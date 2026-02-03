@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.*
+
+# TypeScript
+.tsbuildinfo
+
+# Foundry
+onchain/hooks/lib/
+onchain/hooks/out/
+onchain/hooks/cache/
+onchain/hooks/broadcast/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
