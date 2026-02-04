@@ -10,6 +10,7 @@ import { parseUnits, MaxUint256 } from "ethers";
 import { getAavePool, getERC20 } from "./pool.js";
 
 /** Variable interest rate mode for Aave V3 */
+// MVP assumption: Rescue.ETH supports VARIABLE-rate borrows only
 const VARIABLE_RATE_MODE = 2n;
 
 /**
