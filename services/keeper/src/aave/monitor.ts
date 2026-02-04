@@ -28,8 +28,7 @@ interface AaveAccountData {
   healthFactor: bigint;
 }
 
-/** Ray scaling factor for Aave (1e27 for some values, 1e18 for health factor) */
-const HEALTH_FACTOR_DECIMALS = 18n;
+const HEALTH_FACTOR_DECIMALS = 27n;
 const HEALTH_FACTOR_DIVISOR = 10n ** HEALTH_FACTOR_DECIMALS;
 
 /** Base currency decimals (Aave uses 8 decimals for USD base) */
@@ -54,14 +53,17 @@ export async function getUserRisk(
     
     const accountData: AaveAccountData = await pool.getUserAccountData(userAddress);
     
-    // Convert health factor from ray (1e18) to decimal number
-    // Health factor of 1e18 = 1.0 (liquidation threshold)
-    const healthFactor = Number(accountData.healthFactor) / Number(HEALTH_FACTOR_DIVISOR);
+    // Convert health factor from ray (1e27) to decimal number
+    // Health factor of 1e27 = 1.0 (liquidation threshold)
+  const healthFactor =
+  Number(accountData.healthFactor / HEALTH_FACTOR_DIVISOR);
     
     // Convert total debt from base currency units to USD
     // Aave base currency uses 8 decimals
-    const totalDebtUsd = Number(accountData.totalDebtBase) / Number(BASE_CURRENCY_DIVISOR);
-    
+   const totalDebtUsd =
+  Number(accountData.totalDebtBase / BASE_CURRENCY_DIVISOR);
+
+  
     return {
       healthFactor,
       totalDebtUsd,
