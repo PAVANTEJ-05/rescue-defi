@@ -1,0 +1,187 @@
+import { createConfig, config, type Route, ChainId, getRoutes, getStepTransaction, getStatus, EVM } from "@lifi/sdk";
+import { createWalletClient, createTestClient, createPublicClient, http, type Chain, type WalletClient, publicActions, walletActions, parseAbi, keccak256, encodeAbiParameters, pad, toHex } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { arbitrum, mainnet, optimism, polygon, base } from 'viem/chains';
+import {encodeFunctionData } from "viem"
+// Setup Account and Client
+const WHALE_ADDRESS = privateKeyToAccount('0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a'); // USDC Whale
+const chains = [arbitrum, mainnet, optimism, polygon, base];
+
+// 1. Setup Test Client to impersonate
+// const testClient = createTestClient({
+//     chain: mainnet,
+//     mode: 'anvil',
+//     transport: http("http://127.0.0.1:8545"),
+// })
+// .extend(publicActions)
+// .extend(walletActions);
+
+// 2. Setup Wallet Client using the impersonated address
+// When using an address string as 'account', Viem uses eth_sendTransaction
+const client = createWalletClient({
+    account: WHALE_ADDRESS,
+    chain: mainnet,
+    transport: http("http://127.0.0.1:8545"),
+});
+
+const publicClient = createPublicClient({
+    chain: mainnet,
+    transport: http("http://127.0.0.1:8545"),
+});
+
+const baseClient = createWalletClient({
+    account: WHALE_ADDRESS,
+    chain: base,
+    transport: http("http://127.0.0.1:8546"),
+});
+
+const baseTestClient = createTestClient({
+    chain: base,
+    mode: 'anvil',
+    transport: http("http://127.0.0.1:8546"),
+})
+.extend(publicActions)
+.extend(walletActions);
+
+const WETH_BASE = '0x4200000000000000000000000000000000000006';
+const WETH_ABI = parseAbi([
+    'function deposit() payable',
+    'function balanceOf(address owner) view returns (uint256)'
+]);
+
+// Helper to check balance
+const ERC20_ABI = parseAbi([
+    'function balanceOf(address owner) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)'
+]);
+const USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+
+// Unified Configuration
+createConfig({
+    integrator: "test-Lifi",
+    rpcUrls: {
+        [ChainId.ETH]: ["http://127.0.0.1:8545"],
+        [ChainId.BAS]: ["http://127.0.0.1:8546"]
+    },
+    providers: [
+        EVM({
+            getWalletClient: async () => client,
+            switchChain: async (chainId) =>
+                // Switch chain by creating a new wallet client
+                createWalletClient({
+                    account: WHALE_ADDRESS,
+                    chain: chains.find((chain) => chain.id == chainId) as Chain,
+                    transport: (chainId === ChainId.BAS ? http("http://127.0.0.1:8546") : http("http://127.0.0.1:8545")),
+                }),
+        }),
+    ],
+    preloadChains: false
+});
+
+// Main Execution Function
+async function main() {
+    // Impersonate the whale account
+    // await testClient.account()
+    console.log(`Impersonated ${WHALE_ADDRESS}`);
+
+    console.log("Getting routes...");
+    const result = await getRoutes({
+        fromChainId: ChainId.ETH,
+        toChainId: ChainId.BAS,
+        fromTokenAddress: "0x0000000000000000000000000000000000000000", // USDC on ETH
+        toTokenAddress: '0x4200000000000000000000000000000000000006', // WETH on BASE
+        fromAmount: '10000000000000000',
+        fromAddress: WHALE_ADDRESS.address // Use the whale address!
+    });
+
+    // console.log(config.get())
+    
+    if (!result.routes.length) {
+        console.error("No routes found");
+        return;
+    }
+
+    const route = result.routes[0];
+    if (route==undefined){}
+    else{
+    console.log("Route found:", route.id);
+
+    await executeRouteSteps(route);}
+}
+
+// Simplified example function to execute each step of the route sequentially
+async function executeRouteSteps(route: Route) {
+    for (const steps of route.steps) {
+        // Request transaction data for the current step
+        console.log("steps:---------",steps);
+        const step = await getStepTransaction(steps);
+        console.log("Step transaction data received:---------",step);
+
+        // Send the transaction (e.g. using Viem)
+        if (!step.transactionRequest) {
+            console.error('Missing transactionRequest for step', steps);
+            return;
+        }
+        
+        console.log("--------sending ----transaction\n");
+        // Ensure we are using the correct chain client if needed, 
+        // but for now relying on the global client which points to ETH.
+        // Ideally, we should check step.action.fromChainId and switch client if needed.
+        let currentClient: WalletClient = client;
+        if (step.action.fromChainId === ChainId.BAS) {
+             currentClient = baseClient;
+        }
+        
+        // Remove gas fields to let viem/local node estimate them for the fork
+        const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } = step.transactionRequest as any;
+        console.log("txn will be sent after this , txRequest:-----",txRequest )
+        const transactionHash = await currentClient.sendTransaction(txRequest);
+        console.log(`Transaction sent: ${transactionHash}`);
+
+        console.log("Waiting for local confirmation...");
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: transactionHash });
+        console.log(`Transaction mined in block ${receipt.blockNumber}`);
+
+        // --- SIMULATION BLOCK ---
+        // Since we are on local forks, the real bridge relayers cannot see this transaction.
+        // We must manually simulate the arrival of funds on the Destination Chain (Base).
+        if (step.action.toChainId === ChainId.BAS) {
+            console.log("\n--- SIMULATING BRIDGE ARRIVAL ON BASE ---");
+            console.log("Real bridges (Squid/Axelar) cannot detect transactions on local forks.");
+            console.log("Manually verifying and minting tokens on Base to continue testing...");
+            
+            // 1. Give the user some ETH on Base (to pay for gas or to wrap)
+            // We use anvil_setBalance via testClient
+
+            // await baseTestClient.setBalance({ 
+            //     address: WHALE_ADDRESS.address, 
+            //     value: 1000000000000000000n // 1 ETH
+            // });
+            // console.log("Simulated: Funded user with 1 ETH on Base");
+
+            // 2. Force-set WETH balance using storage manipulation
+            const amountToMint = BigInt(step.estimate.toAmount);
+            console.log(`Simulating delivery of ${amountToMint} wei WETH...`);
+
+            // WETH usually uses Slot 3 for the balance mapping (balanceOf[address])
+            await baseClient.sendTransaction({
+                    to: WETH_BASE,
+                    value: amountToMint,
+                    data: encodeFunctionData({
+                        abi: WETH_ABI,
+                        functionName: 'deposit',
+                    })
+                    })
+
+            
+            console.log(`Simulated: WETH Storage updated directly.`);
+            console.log("--- BRIDGE SIMULATION COMPLETE ---\n");
+        }
+    }
+
+    console.log('All steps executed successfully');
+}
+
+// Run main
+main().catch(console.error);
