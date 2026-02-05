@@ -1,0 +1,48 @@
+{
+  "compilerOptions": {
+    // Output
+    "outDir": "./dist",
+    "rootDir": ".",
+    
+    // Environment
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    
+    // Node.js specific
+    "types": ["node"],
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    
+    // Strict type checking
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    
+    // Module handling
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    
+    // Output quality
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    
+    // Skip checking node_modules
+    "skipLibCheck": true,
+    
+    // Prevent common errors
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
