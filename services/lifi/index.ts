@@ -7,6 +7,7 @@ import {
   getStepTransaction,
   getStatus,
   EVM,
+  convertQuoteToRoute,
   executeRoute,
 } from "@lifi/sdk";
 import {
@@ -15,7 +16,7 @@ import {
   createPublicClient,
   http,
   parseEther,
-  encodeFunctionData, 
+  encodeFunctionData,
   type Chain,
   type WalletClient,
   publicActions,
@@ -39,7 +40,7 @@ const ETH_WHALE = privateKeyToAccount(
 ); // test whale private key
 const chains = [arbitrum, mainnet, optimism, polygon, base];
 const USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-
+const AAVE_POOL_ADDRESS = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5";
 const tokensByChain = {
   1: [
     {
@@ -59,8 +60,8 @@ const tokensByChain = {
       name: "Base",
       decimals: 6,
       priceUSD: "0.9999",
-    },   
-     {
+    },
+    {
       chainId: 8453,
       address: "0x0000000000000000000000000000000000000000",
       symbol: "ETH",
@@ -75,7 +76,7 @@ const tokensByChain = {
 const testClient = createTestClient({
   chain: mainnet,
   mode: "anvil",
-  transport: http("http://127.0.0.1:8545"),
+  transport: http("http://127.0.0.1:8546"),
 })
   .extend(publicActions)
   .extend(walletActions);
@@ -89,10 +90,10 @@ function getWalletClientForChain(chainId: number) {
       ? http(
           "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
         )
-      : http("http://127.0.0.1:8545");
+      : http("http://127.0.0.1:8546");
 
   return createWalletClient({
-    account: ETH_WHALE,
+    account: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7", // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING)
     chain: (chain ?? mainnet) as Chain,
     transport,
   });
@@ -104,7 +105,7 @@ function getPublicClientForChain(chainId: number) {
       ? http(
           "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
         )
-      : http("http://127.0.0.1:8545");
+      : http("http://127.0.0.1:8546");
 
   return createPublicClient({
     chain: chainId === ChainId.BAS ? base : mainnet,
@@ -142,6 +143,21 @@ const USDC_ABI = parseAbi([
   "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
+const AAVE_POOL_ABI = parseAbi([
+  // Read: Get user's aggregate position data
+  "function getUserAccountData(address user) view returns (" +
+    "uint256 totalCollateralBase," +
+    "uint256 totalDebtBase," +
+    "uint256 availableBorrowsBase," +
+    "uint256 currentLiquidationThreshold," +
+    "uint256 ltv," +
+    "uint256 healthFactor" +
+    ")",
+
+  // Write: Supply collateral
+  "function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)",
+]);
+
 // Known USDC holder on Base (used for impersonation on the fork to transfer tokens)
 const BASE_USDC_HOLDER = "0xc001F2D9DD70a8dbe12D073B60fdCD3610c77939";
 
@@ -156,7 +172,7 @@ const BASE_USDC_HOLDER = "0xc001F2D9DD70a8dbe12D073B60fdCD3610c77939";
 createConfig({
   integrator: "test-Lifi",
   rpcUrls: {
-    [ChainId.ETH]: ["http://127.0.0.1:8545"],
+    [ChainId.ETH]: ["http://127.0.0.1:8546"],
     [ChainId.BAS]: [
       "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
     ],
@@ -169,54 +185,77 @@ createConfig({
         getWalletClientForChain(chainId),
     }),
   ],
-  preloadChains: true,
+  preloadChains: false,
 });
-const publicClient = createPublicClient({
-  chain: mainnet,
-  transport: http('https://rpc.buildbear.io/vivacious-gamora-5947d622'),
-})
+
 // Main Execution Function
 async function main() {
   // Impersonate the whale account on the mainnet fork (optional)
-  // await testClient.impersonateAccount(ETH_WHALE.address)
-const ensText = await publicClient.getEnsText({
-  name: normalize('nick.eth'),
-  key: 'com.twitter',
-})
-console.log(ensText)
-
-  console.log("Getting routes...");
-  const result = await getRoutes({
-    fromChainId: ChainId.ETH,
-    toChainId: ChainId.BAS,
-    fromTokenAddress: "0x0000000000000000000000000000000000000000", // ETH on ETH
-    toTokenAddress: USDC_BASE_ADDRESS, // USDC on Base
-    fromAmount: "30000000000000000",
-    fromAddress: ETH_WHALE.address, // Use the whale address
+  await testClient.impersonateAccount({
+    address: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7",
   });
 
-  // console.log(config.get())
 
-  if (!result.routes.length) {
-    console.error("No routes found");
-    return;
-  }
+  // ============== GETTING ROUTES FOR NORMAL BRIDGE SWAP ===========
+  //   console.log("Getting routes...");
+  //   const result = await getRoutes({
+  //     fromChainId: ChainId.ETH,
+  //     toChainId: ChainId.BAS,
+  //     fromTokenAddress: "0x0000000000000000000000000000000000000000", // ETH on ETH
+  //     toTokenAddress: USDC_BASE_ADDRESS, // USDC on Base
+  //     fromAmount: "30000000000000000",
+  //     fromAddress: ETH_WHALE.address, // Use the whale address
+  //   });
 
-  const route = result.routes[0];
-  if (!route) return;
+  //   // console.log(config.get())
 
-  console.log("Route found:", route.id);
-//   await executeRouteSteps(route);
+  //   if (!result.routes.length) {
+  //     console.error("No routes found");
+  //     return;
+  //   }
+
+  //   const route = result.routes[0];
+  //   if (!route) return;
+
+  //   console.log("Route found:", route.id);
+  // //   await executeRouteSteps(route);
+
+  // ================= CONTRACT CALL QUOTE AND EXECUTION OF TXN =================
+  // Contract call quote transacrtion request
+  const contractCallQuote = await getContractCallsQuote(
+    contractCallsQuoteRequest,
+  );
+  console.log(contractCallQuote);
+  const fromChainId = contractCallQuote.action.fromChainId;
+  const currentClient = getWalletClientForChain(fromChainId);
+  const currentPublicClient = getPublicClientForChain(fromChainId);
+
+  // Remove gas fields to let viem/local node estimate them for the fork
+  const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } =
+    contractCallQuote.transactionRequest as any;
+  console.log("txn will be sent after this , txRequest:-----", txRequest);
+
+  const transactionHash = await currentClient.sendTransaction(txRequest);
+  console.log(`Transaction sent: ${transactionHash}`);
+
+  console.log("Waiting for local confirmation...");
+  const receipt = await currentPublicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+  });
+  console.log(`Transaction mined in block ${receipt.blockNumber}`);
+
+// TO-DO: SIMULATE THE CONTRACT CALL ON BASE MAINNET ON TENDERLY URL USING CHEATCODES (IF POSSIBLE ALSO MANIULATE THE HF OF AAVE CONTRACT ON TARGET CHAIN)
 
 
-// Contract call quote transacrtion request
- const contractCallQuote = await getContractCallsQuote(contractCallsQuoteRequest);
-console.log(contractCallQuote)
+  //===========    CHECKING TOKEN BALANCES AFTER TRANSFER ==============
   // After execution, show balances for the test wallet across chains
- const balance = await getTokenBalancesByChain(ETH_WHALE.address, tokensByChain)
+  const balance = await getTokenBalancesByChain(
+    ETH_WHALE.address,
+    tokensByChain,
+  );
 
-// Display balances per chain/token (handles bigint amounts)
-function formatAmount(amount: bigint, decimals: number) {
+  // Display balances per chain/token (handles bigint amounts)
+  function formatAmount(amount: bigint, decimals: number) {
     const sign = amount < 0n ? "-" : "";
     const a = amount < 0n ? -amount : amount;
     const base = 10n ** BigInt(decimals);
@@ -224,35 +263,41 @@ function formatAmount(amount: bigint, decimals: number) {
     let fraction = (a % base).toString().padStart(decimals, "0");
     fraction = fraction.replace(/0+$/, ""); // trim trailing zeros
     return `${sign}${integer.toString()}${fraction ? "." + fraction : ""}`;
-}
+  }
 
-Object.entries(balance ?? {}).forEach(([chainId, tokens]) => {
+  Object.entries(balance ?? {}).forEach(([chainId, tokens]) => {
     console.log(`Chain ${chainId}:`);
     (tokens ?? []).forEach((t: any) => {
-        const { address, symbol, amount, decimals } = t;
-        const amt = typeof amount === "bigint" ? amount : BigInt(amount);
-        console.log(
-            `  ${symbol} (${address}) = ${formatAmount(amt, Number(decimals))} (decimals=${decimals})`
-        );
+      const { address, symbol, amount, decimals } = t;
+      const amt = typeof amount === "bigint" ? amount : BigInt(amount);
+      console.log(
+        `  ${symbol} (${address}) = ${formatAmount(amt, Number(decimals))} (decimals=${decimals})`,
+      );
     });
-});
+  });
 }
 
+// Calldata for the contract call for aave
+const calldata = encodeFunctionData({
+  abi: AAVE_POOL_ABI,
+  functionName: "supply",
+  args: [USDC_BASE_ADDRESS, BigInt(8500000), ETH_WHALE.address, 0], // refer abi code of aave to pass what arguments
+});
+
 const contractCallsQuoteRequest = {
-  fromAddress: ETH_WHALE.address,
+  fromAddress: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7", // replace by contract address of executor contract which keeper calls
   fromChain: 1,
-  fromToken: '0x0000000000000000000000000000000000000000',
-  toAmount: '8500000000000',
+  fromToken: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+  toAmount: "8500000",
   toChain: 8453,
-  toToken: '0x0000000000000000000000000000000000000000',
+  toToken: USDC_BASE_ADDRESS,
   contractCalls: [
     {
-      fromAmount: '8500000000000',
-      fromTokenAddress: '0x0000000000000000000000000000000000000000',
-      toContractAddress: '0x0000000000000068F116a894984e2DB1123eB395',
-      toContractCallData:
-        '0xe7acab24000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000006e0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000029dacdf7ccadf4ee67c923b4c22255a4b2494ed700000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000520000000000000000000000000000000000000000000000000000000000000064000000000000000000000000090884b5bd9f774ed96f941be2fb95d56a029c99c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000160000000000000000000000000000000000000000000000000000000000000022000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066757dd300000000000000000000000000000000000000000000000000000000669d0a580000000000000000000000000000000000000000000000000000000000000000360c6ebe0000000000000000000000000000000000000000ad0303de3e1093e50000007b02230091a7ed01230072f7006a004d60a8d4e71d599b8104250f000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000200000000000000000000000029f25e8a71e52e795e5016edf7c9e02a08c519b40000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006ff0cbadd00000000000000000000000000000000000000000000000000000006ff0cbadd0000000000000000000000000090884b5bd9f774ed96f941be2fb95d56a029c99c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003179fcad000000000000000000000000000000000000000000000000000000003179fcad000000000000000000000000000000a26b00c1f0df003000390027140000faa7190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008a88c37e000000000000000000000000000000000000000000000000000000008a88c37e000000000000000000000000009323bb21a4c6122f60713e4a1e38e7b94a40ce2900000000000000000000000000000000000000000000000000000000000000e3b5b41791fe051471fa3c2da1325a8147c833ad9a6609ffc07a37e2603de3111b262911aaf25ed6d131dd531574cf54d4ea61b479f2b5aaa2dff7c210a3d4e203000000f37ec094486e9092b82287d7ae66fbf8cd6148233c70813583e3264383afbd0484b80500070135f54edd2918ddd4260c840f8a6957160766a4e4ef941517f2a0ab3077a2ac6478f0ad7fad9b821766df11ca3fdb16a8e95782faaed6e0395df2f416651ac87a5c1edec0a36ad42555083e57cff59f4ad98617a48a3664b2f19d46f4db85e95271c747d03194b5cfdcfc86bb0b08fb2bc4936d6f75be03ab498d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
-      toContractGasLimit: '210000',
+      fromAmount: "8500000",
+      fromTokenAddress: USDC_BASE_ADDRESS,
+      toContractAddress: AAVE_POOL_ADDRESS,
+      toContractCallData: calldata,
+      toContractGasLimit: "500000",
     },
   ],
 };
@@ -344,7 +389,7 @@ async function executeRouteSteps(route: Route) {
 
         // Stop impersonation if the test client supports it
         try {
-        //   await baseTestClient.stopImpersonatingAccount(BASE_USDC_HOLDER);
+          //   await baseTestClient.stopImpersonatingAccount(BASE_USDC_HOLDER);
         } catch (e) {
           // not critical
         }
