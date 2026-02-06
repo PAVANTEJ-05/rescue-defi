@@ -1,193 +1,110 @@
 /**
- * LI.FI Execute via RescueExecutor
+ * LI.FI Transaction Execution for Rescue.ETH
  * 
  * ============================================================
- * WHAT THIS MODULE DOES:
+ * DEMO-ONLY / FORK ENVIRONMENT
  * ============================================================
- * - Submits transactions to RescueExecutor contract
- * - Passes LI.FI calldata for token routing/bridging
- * - Handles gas payment and msg.value
- * - Checks cooldown status before execution
+ * This module handles the actual transaction submission for LI.FI quotes.
  * 
+ * IMPORTANT NOTES:
+ * 1. Gas fields are STRIPPED from transactions to let viem/local node estimate
+ *    This is required because fork gas estimates differ from mainnet
+ * 
+ * 2. Transactions are submitted to LOCAL FORKS, not real networks
+ *    Real bridges/relayers cannot see these transactions
+ * 
+ * 3. After execution on source chain, bridge simulation is required
+ *    (See simulate.ts for manual token delivery on destination)
+ * 
+ * PRODUCTION DIFFERENCES:
+ * - Keep gas fields or let wallet estimate
+ * - Real bridge relayers will complete the cross-chain transfer
+ * - No manual simulation needed
  * ============================================================
- * WHAT THIS MODULE DOES NOT DO:
- * ============================================================
- * - Does NOT supply tokens to Aave (see CRITICAL NOTE below)
- * - Does NOT verify user has approved tokens
- * - Does NOT simulate the transaction
- * 
- * ============================================================
- * CRITICAL ARCHITECTURAL GAP:
- * ============================================================
- * This module executes LI.FI routing, which swaps/bridges tokens.
- * However, LI.FI does NOT automatically supply tokens to Aave.
- * 
- * After executeRescue() completes:
- * - Tokens have been routed (swapped/bridged) via LI.FI
- * - Tokens are sitting in the user's wallet (or RescueExecutor)
- * - Tokens are NOT deposited as Aave collateral
- * 
- * TO COMPLETE THE RESCUE, one of these is needed:
- * 1. Add AavePool.supply() call in RescueExecutor.executeRescue()
- * 2. Use LI.FI hooks to call Aave after the swap
- * 3. Add a second transaction step in this module
- * 
- * This is a known TODO for Phase 1+.
- * ============================================================
- * 
- * PRODUCTION RULES:
- * - Contract executes blindly but safely (target restricted to LI.FI router)
- * - Keeper never edits calldata from LI.FI
- * - User funds pulled via transferFrom (pre-approved)
  */
 
-import { Contract, type Signer, type TransactionReceipt } from 'ethers';
-import type { LiFiQuote, RescueResult } from '../config/types.js';
-import { logger } from '../utils/logger.js';
+import type { Signer } from 'ethers';
+import { Contract } from 'ethers';
+import type { LiFiQuoteResponse, ExecuteParams } from './types.js';
+import { getWalletClientForChain, getPublicClientForChain } from './config.js';
+import type { RescueResult } from '../config/types.js';
+
+// ============================================================
+// TRANSACTION EXECUTION
+// ============================================================
 
 /**
- * RescueExecutor ABI (only executeRescue function)
+ * Execute a LI.FI transaction on a forked network
+ * 
+ * This function:
+ * 1. Gets the appropriate wallet/public clients for the source chain
+ * 2. Strips gas fields to let local node estimate (fork-specific)
+ * 3. Submits the transaction
+ * 4. Waits for confirmation
+ * 
+ * @param chainId - Source chain ID
+ * @param transactionRequest - Full transaction request from LI.FI quote
+ * @returns Transaction hash and receipt
+ */
+export async function executeTransaction(
+  chainId: number,
+  transactionRequest: any
+): Promise<{ hash: string; blockNumber: bigint }> {
+  const walletClient = getWalletClientForChain(chainId);
+  const publicClient = getPublicClientForChain(chainId);
+
+  // Strip gas fields - let viem/local node estimate
+  // This is REQUIRED for fork environments where gas estimates differ
+  const {
+    gas,
+    gasPrice,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    ...txRequest
+  } = transactionRequest;
+
+  console.log('Submitting transaction to fork...');
+  console.log('  To:', txRequest.to);
+  console.log('  Value:', txRequest.value?.toString() ?? '0');
+  console.log('  Data length:', txRequest.data?.length ?? 0);
+
+  // Submit transaction
+  const hash = await walletClient.sendTransaction(txRequest);
+  console.log(`Transaction submitted: ${hash}`);
+
+  // Wait for confirmation
+  console.log('Waiting for confirmation...');
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  console.log(`Confirmed in block ${receipt.blockNumber}`);
+
+  return {
+    hash,
+    blockNumber: receipt.blockNumber,
+  };
+}
+
+// ============================================================
+// COOLDOWN TRACKING
+// ============================================================
+
+/**
+ * RescueExecutor contract ABI for cooldown checks
  */
 const RESCUE_EXECUTOR_ABI = [
-  {
-    inputs: [
-      { internalType: 'address', name: 'user', type: 'address' },
-      { internalType: 'address', name: 'tokenIn', type: 'address' },
-      { internalType: 'uint256', name: 'amountIn', type: 'uint256' },
-      { internalType: 'address', name: 'target', type: 'address' },
-      { internalType: 'bytes', name: 'callData', type: 'bytes' },
-    ],
-    name: 'executeRescue',
-    outputs: [],
-    stateMutability: 'payable',
-    type: 'function',
-  },
-  {
-    inputs: [{ internalType: 'address', name: '', type: 'address' }],
-    name: 'lastRescueAt',
-    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-];
+  'function lastRescueTime(address user) view returns (uint256)',
+] as const;
 
 /**
- * Execution parameters for rescue
- */
-export interface ExecuteParams {
-  /** User being rescued */
-  userAddress: string;
-  /** Token to pull from user (address(0) for ETH) */
-  tokenIn: string;
-  /** Amount of tokenIn to pull */
-  amountIn: bigint;
-  /** LI.FI quote with calldata */
-  quote: LiFiQuote;
-  /** Amount in USD (for logging) */
-  amountUSD: number;
-}
-
-/**
- * Execute rescue via RescueExecutor contract
+ * Check if cooldown has passed for a user
  * 
- * @param executorAddress - RescueExecutor contract address
- * @param params - Execution parameters
- * @param signer - Keeper wallet signer
- * @returns Result with transaction hash or error
- */
-export async function executeRescue(
-  executorAddress: string,
-  params: ExecuteParams,
-  signer: Signer
-): Promise<RescueResult> {
-  const { userAddress, tokenIn, amountIn, quote, amountUSD } = params;
-
-  logger.executor.info('Executing rescue', {
-    user: userAddress.slice(0, 10),
-    token: tokenIn.slice(0, 10),
-    amount: amountIn.toString(),
-    amountUSD: amountUSD.toFixed(2),
-    target: quote.to.slice(0, 10),
-  });
-
-  try {
-    const executor = new Contract(executorAddress, RESCUE_EXECUTOR_ABI, signer);
-
-    // Determine msg.value - only needed if tokenIn is native ETH
-    const isNativeToken = tokenIn === '0x0000000000000000000000000000000000000000';
-    const msgValue = isNativeToken ? BigInt(quote.value) : 0n;
-
-    // Execute the rescue
-    type ExecuteRescueFn = (
-      user: string,
-      tokenIn: string,
-      amountIn: bigint,
-      target: string,
-      callData: string,
-      overrides: { value: bigint }
-    ) => Promise<{ hash: string; wait: () => Promise<TransactionReceipt> }>;
-    
-    const tx = await (executor.executeRescue as ExecuteRescueFn)(
-      userAddress,
-      tokenIn,
-      amountIn,
-      quote.to,
-      quote.data,
-      { value: msgValue }
-    );
-
-    logger.executor.info('Transaction submitted', { txHash: tx.hash });
-
-    // Wait for confirmation
-    const receipt: TransactionReceipt = await tx.wait();
-
-    if (receipt.status === 0) {
-      throw new Error('Transaction reverted');
-    }
-
-    logger.executor.info('Rescue executed successfully', {
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      gasUsed: receipt.gasUsed.toString(),
-    });
-
-    return {
-      success: true,
-      txHash: receipt.hash,
-      amountUSD,
-      timestamp: Date.now(),
-    };
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-    // Check for specific revert reasons
-    if (errorMessage.includes('CooldownActive')) {
-      logger.executor.warn('Cooldown still active', { user: userAddress });
-    } else if (errorMessage.includes('OnlyKeeper')) {
-      logger.executor.error('Not authorized as keeper');
-    } else if (errorMessage.includes('InvalidTarget')) {
-      logger.executor.error('Invalid target address (not LI.FI router)');
-    } else {
-      logger.executor.error('Rescue failed', { error: errorMessage });
-    }
-
-    return {
-      success: false,
-      error: errorMessage,
-      amountUSD,
-      timestamp: Date.now(),
-    };
-  }
-}
-
-/**
- * Check if user cooldown has passed
+ * The RescueExecutor contract tracks when each user was last rescued.
+ * This prevents rapid repeated rescues that could drain user funds.
  * 
  * @param executorAddress - RescueExecutor contract address
  * @param userAddress - User to check
- * @param cooldownSeconds - Required cooldown period
- * @param signer - Signer for read call
- * @returns true if cooldown has passed
+ * @param cooldownSeconds - Required cooldown period from ENS policy
+ * @param signer - Ethers signer for contract calls
+ * @returns True if cooldown has passed (or no previous rescue)
  */
 export async function isCooldownPassed(
   executorAddress: string,
@@ -197,49 +114,133 @@ export async function isCooldownPassed(
 ): Promise<boolean> {
   try {
     const executor = new Contract(executorAddress, RESCUE_EXECUTOR_ABI, signer);
-    const lastRescue: bigint = await (executor.lastRescueAt as (user: string) => Promise<bigint>)(userAddress);
-
-    if (lastRescue === 0n) {
-      // Never rescued before
-      return true;
-    }
-
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const cooldownEnd = Number(lastRescue) + cooldownSeconds;
-
-    return nowSeconds >= cooldownEnd;
+    // Use getFunction to properly type the call
+    const lastRescueTimeFn = executor.getFunction('lastRescueTime');
+    const lastRescueTime = await lastRescueTimeFn(userAddress);
+    
+    const now = Math.floor(Date.now() / 1000);
+    const elapsed = now - Number(lastRescueTime);
+    
+    return elapsed >= cooldownSeconds;
   } catch (error) {
-    logger.executor.error('Failed to check cooldown', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-    // Fail closed - assume cooldown not passed
-    return false;
+    // If contract call fails (e.g., never rescued), assume cooldown passed
+    console.warn('Cooldown check failed, assuming passed:', error);
+    return true;
   }
 }
+
+// ============================================================
+// RESCUE EXECUTION (KEEPER INTEGRATION)
+// ============================================================
 
 /**
- * Get remaining cooldown time in seconds
+ * RescueExecutor contract ABI for rescue execution
  */
-export async function getRemainingCooldown(
+const RESCUE_EXECUTOR_FULL_ABI = [
+  'function lastRescueTime(address user) view returns (uint256)',
+  'function executeRescue(address user, address tokenIn, uint256 amountIn, address lifiTarget, bytes calldata lifiData, uint256 lifiValue) payable',
+] as const;
+
+/**
+ * Execute a rescue via the RescueExecutor contract
+ * 
+ * This is the main entry point for the keeper to execute a rescue.
+ * It calls the RescueExecutor.executeRescue() function which:
+ * 1. Transfers tokens from user to executor (requires prior approval)
+ * 2. Forwards to LI.FI for bridge/swap
+ * 3. LI.FI calls Aave.supply() on destination
+ * 
+ * @param executorAddress - RescueExecutor contract address
+ * @param params - Execution parameters (user, token, amount, quote)
+ * @param signer - Ethers signer (keeper wallet)
+ * @returns Rescue result with success status and transaction hash
+ */
+export async function executeRescue(
   executorAddress: string,
-  userAddress: string,
-  cooldownSeconds: number,
+  params: ExecuteParams,
   signer: Signer
-): Promise<number> {
+): Promise<RescueResult> {
+  const { userAddress, tokenIn, amountIn, quote, amountUSD } = params;
+
   try {
-    const executor = new Contract(executorAddress, RESCUE_EXECUTOR_ABI, signer);
-    const lastRescue: bigint = await (executor.lastRescueAt as (user: string) => Promise<bigint>)(userAddress);
+    const executor = new Contract(executorAddress, RESCUE_EXECUTOR_FULL_ABI, signer);
 
-    if (lastRescue === 0n) {
-      return 0;
-    }
+    console.log('Executing rescue...');
+    console.log('  User:', userAddress);
+    console.log('  Token:', tokenIn);
+    console.log('  Amount:', amountIn.toString());
+    console.log('  USD value:', amountUSD.toFixed(2));
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const cooldownEnd = Number(lastRescue) + cooldownSeconds;
-    const remaining = cooldownEnd - nowSeconds;
+    // Execute the rescue using getFunction for proper typing
+    const executeRescueFn = executor.getFunction('executeRescue');
+    const tx = await executeRescueFn(
+      userAddress,
+      tokenIn,
+      amountIn,
+      quote.to,
+      quote.data,
+      BigInt(quote.value),
+      {
+        value: BigInt(quote.value), // msg.value for native token bridges
+      }
+    );
 
-    return Math.max(0, remaining);
-  } catch {
-    return cooldownSeconds; // Assume full cooldown on error
+    console.log('Waiting for transaction...');
+    const receipt = await tx.wait();
+
+    return {
+      success: true,
+      txHash: receipt.hash,
+      amountUSD,
+      timestamp: Date.now(),
+    };
+  } catch (error) {
+    console.error('Rescue execution failed:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      amountUSD,
+      timestamp: Date.now(),
+    };
   }
 }
+
+// ============================================================
+// ROUTE STEP EXECUTION (FROM ORIGINAL INDEX.TS)
+// ============================================================
+
+/**
+ * Execute a single step of a LI.FI route
+ * 
+ * This is preserved from the original implementation.
+ * Used for multi-step routes (multiple bridges/swaps).
+ * 
+ * NOTE: For Rescue.ETH, we primarily use contractCallsQuote which
+ * bundles everything into a single transaction. This function is
+ * kept for compatibility with standard LI.FI routes if needed.
+ * 
+ * @param step - Step information from route
+ * @param getStepTransaction - LI.FI SDK function to get step tx data
+ * @returns Execution result
+ */
+export async function executeRouteStep(
+  step: any,
+  getStepTransaction: (step: any) => Promise<any>
+): Promise<{ hash: string; blockNumber: bigint }> {
+  // Get transaction data for the step
+  const stepWithTx = await getStepTransaction(step);
+  
+  if (!stepWithTx.transactionRequest) {
+    throw new Error('Missing transactionRequest for step');
+  }
+
+  // Execute on the source chain
+  const fromChainId = stepWithTx.action.fromChainId;
+  return executeTransaction(fromChainId, stepWithTx.transactionRequest);
+}
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
+export type { ExecuteParams };

@@ -8,16 +8,21 @@
     "build": "tsc",
     "dev": "tsx watch index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ens:demo": "tsx ens/demo.ts",
+    "lifi:demo": "tsx lifi/demo.ts"
   },
   "dependencies": {
-    "dotenv": "^16.4.1",
-    "ethers": "^6.10.0"
+    "@ensdomains/ensjs": "^4.0.2",
+    "@lifi/sdk": "^3.4.1",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "viem": "^2.21.32"
   },
   "devDependencies": {
-    "@types/node": "^20.10.6",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
   },
   "engines": {
     "node": ">=18.0.0"

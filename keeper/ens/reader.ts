@@ -1,199 +1,239 @@
 /**
- * ENS Text Record Reader
+ * ENS Record Reader for Rescue.ETH
  * 
  * ============================================================
- * WHAT THIS MODULE DOES:
+ * DEMO-ONLY / FORK ENVIRONMENT
  * ============================================================
- * - Reads raw ENS text records from mainnet
- * - Looks up resolver address for ENS name
- * - Fetches all rescue.* text records
- * - Returns raw strings (no parsing/validation)
  * 
- * ============================================================
- * WHAT THIS MODULE DOES NOT DO:
- * ============================================================
- * - Does NOT parse or validate values (that's ens/parser.ts)
- * - Does NOT write to ENS
- * - Does NOT cache results
+ * This module reads rescue configuration from ENS text records.
+ * It is designed to work on a FORKED MAINNET environment.
  * 
- * ============================================================
- * ENS KEYS USED:
- * ============================================================
- * - rescue.minHF: Trigger threshold (e.g., "1.3")
- * - rescue.targetHF: Goal after rescue (e.g., "1.8")
- * - rescue.maxAmountUSD: Max single rescue (e.g., "5000")
- * - rescue.allowedTokens: Comma-separated symbols (e.g., "USDC,USDT,DAI")
- * - rescue.allowedChains: Comma-separated chain IDs (e.g., "1,42161,10")
- * - rescue.cooldownSeconds: Min time between rescues (e.g., "3600")
+ * WHY FORKS:
+ * - ENS is only on mainnet (and testnets)
+ * - Testing requires reading/writing ENS records without real costs
+ * - Impersonation allows writing records for any ENS name on fork
  * 
- * ENS is the SINGLE SOURCE OF TRUTH for user policy configuration.
+ * ENS RECORD KEYS:
+ * - rescue.minHF        → Minimum health factor to trigger rescue
+ * - rescue.targetHF     → Target health factor after rescue
+ * - rescue.maxAmount    → Maximum USD amount per rescue
+ * - rescue.cooldown     → Seconds between rescues
+ * - rescue.allowedTokens → Comma-separated token symbols
+ * - rescue.allowedChains → Comma-separated chain IDs
+ * 
+ * PRODUCTION NOTES:
+ * - Real mainnet RPC would be used (not fork)
+ * - No impersonation needed for reads
+ * - Users set their own records via ENS app
+ * ============================================================
  */
 
-import { type Provider, namehash } from 'ethers';
-import { Contract } from 'ethers';
-import { logger } from '../utils/logger.js';
+import { createPublicClient, http, type PublicClient } from 'viem';
+import { mainnet } from 'viem/chains';
+import { normalize } from 'viem/ens';
+import type { Provider } from 'ethers';
+
+// ============================================================
+// ENS RECORD KEYS
+// ============================================================
 
 /**
- * ENS Registry address (same on mainnet and most networks)
- */
-const ENS_REGISTRY_ADDRESS = '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e';
-
-/**
- * ENS Public Resolver ABI (text record function only)
- */
-const RESOLVER_ABI = [
-  {
-    inputs: [
-      { internalType: 'bytes32', name: 'node', type: 'bytes32' },
-      { internalType: 'string', name: 'key', type: 'string' },
-    ],
-    name: 'text',
-    outputs: [{ internalType: 'string', name: '', type: 'string' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-];
-
-/**
- * ENS Registry ABI (resolver lookup only)
- */
-const REGISTRY_ABI = [
-  {
-    inputs: [{ internalType: 'bytes32', name: 'node', type: 'bytes32' }],
-    name: 'resolver',
-    outputs: [{ internalType: 'address', name: '', type: 'address' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-];
-
-/**
- * Rescue.ETH ENS text record keys
+ * ENS text record keys for rescue configuration
+ * 
+ * These are the standard keys that Rescue.ETH reads from ENS.
+ * Users must set these records on their ENS name to configure rescues.
  */
 export const ENS_KEYS = {
   MIN_HF: 'rescue.minHF',
   TARGET_HF: 'rescue.targetHF',
-  MAX_AMOUNT_USD: 'rescue.maxAmountUSD',
+  MAX_AMOUNT: 'rescue.maxAmount',
+  COOLDOWN: 'rescue.cooldown',
   ALLOWED_TOKENS: 'rescue.allowedTokens',
   ALLOWED_CHAINS: 'rescue.allowedChains',
-  COOLDOWN_SECONDS: 'rescue.cooldownSeconds',
 } as const;
 
 /**
- * Raw ENS text records (unparsed strings)
+ * All ENS keys as an array (for iteration)
  */
-export interface RawEnsConfig {
-  minHF?: string | undefined;
-  targetHF?: string | undefined;
-  maxAmountUSD?: string | undefined;
-  allowedTokens?: string | undefined;
-  allowedChains?: string | undefined;
-  cooldownSeconds?: string | undefined;
-}
+export const ALL_ENS_KEYS = Object.values(ENS_KEYS);
+
+// ============================================================
+// RAW CONFIG TYPE
+// ============================================================
 
 /**
- * Get the resolver address for an ENS name
+ * Raw configuration as read from ENS
+ * 
+ * All values are strings because ENS text records are strings.
+ * See parser.ts for conversion to typed RescuePolicy.
  */
-async function getResolver(
-  ensName: string,
-  provider: Provider
-): Promise<string | null> {
-  try {
-    const registry = new Contract(ENS_REGISTRY_ADDRESS, REGISTRY_ABI, provider);
-    const node = namehash(ensName);
-    const resolverAddress: string = await (registry.resolver as (node: string) => Promise<string>)(node);
-
-    if (resolverAddress === '0x0000000000000000000000000000000000000000') {
-      return null;
-    }
-
-    return resolverAddress;
-  } catch (error) {
-    logger.ens.error('Failed to get resolver', {
-      ensName,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-    return null;
-  }
+export interface RawEnsConfig {
+  [ENS_KEYS.MIN_HF]?: string;
+  [ENS_KEYS.TARGET_HF]?: string;
+  [ENS_KEYS.MAX_AMOUNT]?: string;
+  [ENS_KEYS.COOLDOWN]?: string;
+  [ENS_KEYS.ALLOWED_TOKENS]?: string;
+  [ENS_KEYS.ALLOWED_CHAINS]?: string;
 }
+
+// ============================================================
+// CLIENT CREATION
+// ============================================================
+
+/**
+ * Default mainnet fork URL
+ * 
+ * For demo/testing, this should point to a local Anvil fork.
+ * For production, use a real mainnet RPC.
+ */
+const DEFAULT_MAINNET_RPC = 'http://127.0.0.1:8546';
+
+/**
+ * Create a viem public client for ENS reads
+ * 
+ * @param rpcUrl - RPC URL (defaults to local fork)
+ * @returns Configured public client
+ */
+export function createEnsPublicClient(rpcUrl: string = DEFAULT_MAINNET_RPC): PublicClient {
+  return createPublicClient({
+    chain: mainnet,
+    transport: http(rpcUrl),
+  });
+}
+
+// ============================================================
+// ENS READING FUNCTIONS
+// ============================================================
 
 /**
  * Read a single ENS text record
+ * 
+ * @param ensName - The ENS name (e.g., 'nick.eth')
+ * @param key - The text record key (e.g., 'rescue.minHF')
+ * @param client - Viem public client
+ * @returns The text value, or null if not set
  */
-async function readTextRecord(
+export async function readEnsText(
   ensName: string,
   key: string,
-  resolverAddress: string,
-  provider: Provider
-): Promise<string | undefined> {
+  client: PublicClient
+): Promise<string | null> {
   try {
-    const resolver = new Contract(resolverAddress, RESOLVER_ABI, provider);
-    const node = namehash(ensName);
-    const value: string = await (resolver.text as (node: string, key: string) => Promise<string>)(node, key);
-
-    // Empty string means no record set
-    return value || undefined;
+    const value = await client.getEnsText({
+      name: normalize(ensName),
+      key,
+    });
+    return value ?? null;
   } catch (error) {
-    logger.ens.debug('Failed to read text record', { ensName, key });
-    return undefined;
+    console.warn(`Failed to read ENS text record ${key} for ${ensName}:`, error);
+    return null;
   }
 }
 
 /**
- * Fetch all Rescue.ETH configuration from ENS text records
+ * Read all rescue configuration records from ENS
  * 
- * @param ensName - ENS name to query (e.g., "vitalik.eth")
- * @param provider - Ethers provider (should be mainnet for ENS)
- * @returns Raw string values for each config key, or null if resolver not found
+ * This reads all the rescue.* text records for a given ENS name.
+ * Returns partial config if some records are missing.
+ * 
+ * @param ensName - The ENS name to read from
+ * @param client - Viem public client (or will create default)
+ * @returns Raw config object with string values
  */
-export async function readEnsConfig(
+export async function readAllEnsConfig(
   ensName: string,
-  provider: Provider
-): Promise<RawEnsConfig | null> {
-  logger.ens.info('Reading ENS config', { ensName });
+  client?: PublicClient
+): Promise<RawEnsConfig> {
+  const publicClient = client ?? createEnsPublicClient();
+  const config: RawEnsConfig = {};
 
-  // Step 1: Get resolver for this name
-  const resolverAddress = await getResolver(ensName, provider);
-  if (!resolverAddress) {
-    logger.ens.warn('No resolver found for ENS name', { ensName });
-    return null;
+  // Read all keys in parallel
+  const results = await Promise.all(
+    ALL_ENS_KEYS.map(async (key) => ({
+      key,
+      value: await readEnsText(ensName, key, publicClient),
+    }))
+  );
+
+  // Collect non-null results
+  for (const { key, value } of results) {
+    if (value !== null) {
+      (config as any)[key] = value;
+    }
   }
-
-  // Step 2: Read all text records in parallel
-  const [minHF, targetHF, maxAmountUSD, allowedTokens, allowedChains, cooldownSeconds] =
-    await Promise.all([
-      readTextRecord(ensName, ENS_KEYS.MIN_HF, resolverAddress, provider),
-      readTextRecord(ensName, ENS_KEYS.TARGET_HF, resolverAddress, provider),
-      readTextRecord(ensName, ENS_KEYS.MAX_AMOUNT_USD, resolverAddress, provider),
-      readTextRecord(ensName, ENS_KEYS.ALLOWED_TOKENS, resolverAddress, provider),
-      readTextRecord(ensName, ENS_KEYS.ALLOWED_CHAINS, resolverAddress, provider),
-      readTextRecord(ensName, ENS_KEYS.COOLDOWN_SECONDS, resolverAddress, provider),
-    ]);
-
-  const config: RawEnsConfig = {
-    minHF,
-    targetHF,
-    maxAmountUSD,
-    allowedTokens,
-    allowedChains,
-    cooldownSeconds,
-  };
-
-  logger.ens.debug('Read raw ENS config', { ensName, config });
 
   return config;
 }
 
 /**
- * Check if an ENS name has any Rescue.ETH configuration
+ * Read ENS config using ethers Provider
+ * 
+ * This is a compatibility wrapper for the keeper which uses ethers.
+ * It creates a viem client internally.
+ * 
+ * @param ensName - The ENS name to read from
+ * @param provider - Ethers provider (used to extract RPC URL if possible)
+ * @returns Raw config object, or null if no records found
+ */
+export async function readEnsConfig(
+  ensName: string,
+  provider: Provider
+): Promise<RawEnsConfig | null> {
+  // Create a viem client
+  // Note: We can't easily extract RPC URL from ethers provider,
+  // so we use the default fork URL
+  const client = createEnsPublicClient();
+  
+  const config = await readAllEnsConfig(ensName, client);
+  
+  // Return null if no records found
+  if (Object.keys(config).length === 0) {
+    return null;
+  }
+  
+  return config;
+}
+
+/**
+ * Check if an ENS name has rescue configuration
+ * 
+ * Quick check to see if at least minHF is set.
+ * 
+ * @param ensName - The ENS name to check
+ * @param client - Viem public client
+ * @returns True if rescue config exists
  */
 export async function hasRescueConfig(
   ensName: string,
-  provider: Provider
+  client?: PublicClient
 ): Promise<boolean> {
-  const config = await readEnsConfig(ensName, provider);
-  if (!config) return false;
+  const publicClient = client ?? createEnsPublicClient();
+  const minHF = await readEnsText(ensName, ENS_KEYS.MIN_HF, publicClient);
+  return minHF !== null;
+}
 
-  // Consider configured if at least minHF or targetHF is set
-  return config.minHF !== undefined || config.targetHF !== undefined;
+/**
+ * Resolve ENS name to address
+ * 
+ * Utility function to get the wallet address for an ENS name.
+ * 
+ * @param ensName - The ENS name
+ * @param client - Viem public client
+ * @returns The resolved address, or null if not found
+ */
+export async function resolveEnsAddress(
+  ensName: string,
+  client?: PublicClient
+): Promise<`0x${string}` | null> {
+  const publicClient = client ?? createEnsPublicClient();
+  
+  try {
+    const address = await publicClient.getEnsAddress({
+      name: normalize(ensName),
+    });
+    return address ?? null;
+  } catch (error) {
+    console.warn(`Failed to resolve ENS name ${ensName}:`, error);
+    return null;
+  }
 }
