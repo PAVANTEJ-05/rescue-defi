@@ -76,7 +76,7 @@ const tokensByChain = {
 const testClient = createTestClient({
   chain: mainnet,
   mode: "anvil",
-  transport: http("http://127.0.0.1:8546"),
+  transport: http("http://127.0.0.1:8545"),
 })
   .extend(publicActions)
   .extend(walletActions);
@@ -90,7 +90,7 @@ function getWalletClientForChain(chainId: number) {
       ? http(
           "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
         )
-      : http("http://127.0.0.1:8546");
+      : http("http://127.0.0.1:8545");
 
   return createWalletClient({
     account: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7", // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING)
@@ -105,7 +105,7 @@ function getPublicClientForChain(chainId: number) {
       ? http(
           "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
         )
-      : http("http://127.0.0.1:8546");
+      : http("http://127.0.0.1:8545");
 
   return createPublicClient({
     chain: chainId === ChainId.BAS ? base : mainnet,
@@ -172,9 +172,9 @@ const BASE_USDC_HOLDER = "0xc001F2D9DD70a8dbe12D073B60fdCD3610c77939";
 createConfig({
   integrator: "test-Lifi",
   rpcUrls: {
-    [ChainId.ETH]: ["http://127.0.0.1:8546"],
+    [ChainId.ETH]: ["http://127.0.0.1:8545"],
     [ChainId.BAS]: [
-      "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
+      "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34"
     ],
   },
   providers: [
@@ -183,6 +183,7 @@ createConfig({
       switchChain: async (chainId) =>
         // Create a new wallet client for the requested chain
         getWalletClientForChain(chainId),
+        // getPublicClient: async (chainId) => getPublicClientForChain(chainId),
     }),
   ],
   preloadChains: false,
@@ -253,7 +254,7 @@ async function main() {
     ETH_WHALE.address,
     tokensByChain,
   );
-
+console.log(balance)
   // Display balances per chain/token (handles bigint amounts)
   function formatAmount(amount: bigint, decimals: number) {
     const sign = amount < 0n ? "-" : "";
@@ -302,6 +303,9 @@ const contractCallsQuoteRequest = {
   ],
 };
 
+
+
+// ===================== EXECUTE ROUTE STEPS =================================
 // Simplified example function to execute each step of the route sequentially
 async function executeRouteSteps(route: Route) {
   for (const stepInfo of route.steps) {
