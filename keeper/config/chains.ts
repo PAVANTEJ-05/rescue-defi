@@ -3,6 +3,18 @@
  * 
  * Defines supported chains and their contract addresses.
  * All addresses are for Aave V3 deployments.
+ * 
+ * ============================================================
+ * LI.FI TRUSTED TARGETS
+ * ============================================================
+ * LI.FI uses multiple execution contracts depending on the route.
+ * We maintain a registry of trusted targets per chain for security.
+ * 
+ * Known LI.FI contracts (from https://docs.li.fi/integrate-li.fi-sdk/deployments):
+ * - LiFiDiamond: 0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE (all chains)
+ * - LiFiDiamondImmutable: 0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF (some chains)
+ * - Receiver/Executor contracts vary by chain
+ * ============================================================
  */
 
 /**
@@ -21,7 +33,7 @@ export interface ChainConfig {
   aavePool: string;
   /** Aave V3 Pool Data Provider (for detailed reserve data) */
   aavePoolDataProvider: string;
-  /** LI.FI Diamond (router) address */
+  /** LI.FI Diamond (router) address - primary router */
   lifiRouter: string;
   /** Block explorer URL */
   explorer: string;
@@ -36,6 +48,78 @@ export const CHAIN_IDS = {
   ARBITRUM: 42161,
   BASE: 8453,
 } as const;
+
+/**
+ * Trusted LI.FI execution targets per chain
+ * 
+ * SECURITY CRITICAL: Only addresses in this registry are allowed as quote targets.
+ * Adding addresses here requires security review.
+ * 
+ * Sources:
+ * - https://docs.li.fi/integrate-li.fi-sdk/deployments
+ * - LI.FI contract verification on block explorers
+ * 
+ * Known contracts:
+ * - LiFiDiamond (primary router): 0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE
+ * - LiFiDiamondImmutable: 0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF
+ * - RelayerCelerIM (Optimism): 0x6a8b11bF29C0546991DEa5569bf3b3C8C4f38d54
+ * - Executor: Chain-specific execution contracts
+ * - GasZipFacet: 0xBfA69CdE0191C59758E483A76A07939C53C177Ab (Optimism, for gas payments)
+ */
+export const TRUSTED_LIFI_TARGETS: Record<number, Set<string>> = {
+  [CHAIN_IDS.MAINNET]: new Set([
+    '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE', // LiFiDiamond
+    '0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF', // LiFiDiamondImmutable
+  ].map(addr => addr.toLowerCase())),
+  
+  [CHAIN_IDS.OPTIMISM]: new Set([
+    '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE', // LiFiDiamond
+    '0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF', // LiFiDiamondImmutable
+    '0x6a8b11bF29C0546991DEa5569bf3b3C8C4f38d54', // RelayerCelerIM
+    '0xbD6C7B0d2f68c2b7805d88388319cfB6EcB50eA9', // Executor
+    '0xBfA69CdE0191C59758E483A76A07939C53C177Ab', // GasZipFacet / Receiver
+    '0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae', // LiFiDiamond (lowercase for safety)
+  ].map(addr => addr.toLowerCase())),
+  
+  [CHAIN_IDS.ARBITRUM]: new Set([
+    '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE', // LiFiDiamond
+    '0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF', // LiFiDiamondImmutable
+  ].map(addr => addr.toLowerCase())),
+  
+  [CHAIN_IDS.BASE]: new Set([
+    '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE', // LiFiDiamond
+    '0x9b11bc9FAc17c058CAB6286b0c785bE6a65492EF', // LiFiDiamondImmutable
+  ].map(addr => addr.toLowerCase())),
+};
+
+/**
+ * Check if an address is a trusted LI.FI target for a given chain
+ * 
+ * @param chainId - The chain ID to check
+ * @param target - The target address from the LI.FI quote
+ * @returns True if the target is trusted for the chain
+ */
+export function isTrustedLiFiTarget(chainId: number, target: string): boolean {
+  const trustedSet = TRUSTED_LIFI_TARGETS[chainId];
+  if (!trustedSet) {
+    return false;
+  }
+  return trustedSet.has(target.toLowerCase());
+}
+
+/**
+ * Get all trusted LI.FI targets for a chain (for logging)
+ * 
+ * @param chainId - The chain ID
+ * @returns Array of trusted addresses or empty array
+ */
+export function getTrustedLiFiTargets(chainId: number): string[] {
+  const trustedSet = TRUSTED_LIFI_TARGETS[chainId];
+  if (!trustedSet) {
+    return [];
+  }
+  return Array.from(trustedSet);
+}
 
 /**
  * Supported chains with full configuration
@@ -61,7 +145,7 @@ export const CHAINS: Record<number, ChainConfig> = {
     nativeToken: 'ETH',
     rpcUrl: 'https://mainnet.optimism.io',
     aavePool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-    aavePoolDataProvider: '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654',
+    aavePoolDataProvider: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
     lifiRouter: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
     explorer: 'https://optimistic.etherscan.io',
   },
@@ -71,7 +155,7 @@ export const CHAINS: Record<number, ChainConfig> = {
     nativeToken: 'ETH',
     rpcUrl: 'https://arb1.arbitrum.io/rpc',
     aavePool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-    aavePoolDataProvider: '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654',
+    aavePoolDataProvider: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
     lifiRouter: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
     explorer: 'https://arbiscan.io',
   },

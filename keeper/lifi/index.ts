@@ -108,7 +108,10 @@ export {
   executeRescue,
   executeRouteStep,
   isCooldownPassed,
+  checkCooldownInfo,
 } from './execute.js';
+
+export type { CooldownInfo } from './execute.js';
 
 // ============================================================
 // SIMULATE EXPORTS

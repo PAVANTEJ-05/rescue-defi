@@ -3,6 +3,9 @@
  * 
  * Handles conversions between different decimal representations
  * used across Aave, ERC20s, and price feeds.
+ * 
+ * CRITICAL: All BigInt conversions must use safe scaling to avoid precision loss.
+ * Never use Number(bigint) directly on large values!
  */
 
 /**
@@ -18,6 +21,13 @@ export const BASE_CURRENCY_DECIMALS = 8n;
 export const BASE_CURRENCY_UNIT = 10n ** BASE_CURRENCY_DECIMALS;
 
 /**
+ * Safe conversion precision for RAY to decimal
+ * Using 18 decimals of precision for intermediate calculations
+ */
+const PRECISION_DECIMALS = 18n;
+const PRECISION_UNIT = 10n ** PRECISION_DECIMALS;
+
+/**
  * Standard ERC20 decimals
  */
 export const COMMON_DECIMALS: Record<string, number> = {
@@ -29,13 +39,55 @@ export const COMMON_DECIMALS: Record<string, number> = {
 };
 
 /**
+ * Convert RAY value (1e27) to decimal number with specified precision
+ * 
+ * CRITICAL FIX: This function safely handles large BigInt values from Aave.
+ * The health factor from getUserAccountData() is a uint256 in RAY (1e27).
+ * 
+ * Example:
+ *   RAY = 1e27
+ *   healthFactor = 1.5e27 (represents HF of 1.5)
+ *   rayToDecimal(1.5e27) => 1.5
+ * 
+ * For very large values (near type(uint256).max), returns Infinity.
+ * 
+ * @param ray - BigInt value in RAY (1e27) units
+ * @param precision - Number of decimal places in result (default: 6)
+ * @returns Decimal number representation
+ */
+export function rayToDecimal(ray: bigint, precision: number = 6): number {
+  // Handle edge cases
+  if (ray === 0n) return 0;
+  
+  // For very large values (effectively infinity in Aave's context)
+  // type(uint256).max / RAY would still be a huge number
+  // Aave uses max uint256 to represent "no debt" scenarios
+  const MAX_REASONABLE_HF = 10n ** 36n; // 1e9 as a RAY value
+  if (ray >= MAX_REASONABLE_HF) {
+    return Infinity;
+  }
+  
+  // Safe conversion using BigInt arithmetic to preserve precision
+  // Scale up by precision first, then divide by RAY, then convert
+  const precisionMultiplier = BigInt(10 ** precision);
+  const scaled = (ray * precisionMultiplier) / RAY;
+  
+  // Now safe to convert to Number since scaled is much smaller
+  // (max precision of 1e6 means result is at most 1e6 * HF)
+  return Number(scaled) / (10 ** precision);
+}
+
+/**
  * Convert RAY value (1e27) to decimal number
- * Used for health factor conversion
+ * 
+ * DEPRECATED: Use rayToDecimal() for explicit precision control.
+ * This function is kept for backward compatibility.
+ * 
+ * @param ray - BigInt value in RAY units
+ * @returns Decimal number
  */
 export function rayToNumber(ray: bigint): number {
-  // Use high precision division
-  const scaled = (ray * 1_000_000n) / RAY;
-  return Number(scaled) / 1_000_000;
+  return rayToDecimal(ray, 6);
 }
 
 /**

@@ -32,13 +32,13 @@ const publicClient = createPublicClient({
 const baseClient = createWalletClient({
     account: WHALE_ADDRESS,
     chain: base,
-    transport: http("http://127.0.0.1:8546"),
+    transport: http("https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765"),
 });
 
 const baseTestClient = createTestClient({
     chain: base,
     mode: 'anvil',
-    transport: http("http://127.0.0.1:8546"),
+    transport: http("https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765"),
 })
 .extend(publicActions)
 .extend(walletActions);
@@ -62,7 +62,7 @@ createConfig({
     integrator: "test-Lifi",
     rpcUrls: {
         [ChainId.ETH]: ["http://127.0.0.1:8545"],
-        [ChainId.BAS]: ["http://127.0.0.1:8546"]
+        [ChainId.BAS]: ["https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765"]
     },
     providers: [
         EVM({
@@ -72,7 +72,7 @@ createConfig({
                 createWalletClient({
                     account: WHALE_ADDRESS,
                     chain: chains.find((chain) => chain.id == chainId) as Chain,
-                    transport: (chainId === ChainId.BAS ? http("http://127.0.0.1:8546") : http("http://127.0.0.1:8545")),
+                    transport: (chainId === ChainId.BAS ? http("https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765") : http("http://127.0.0.1:8545")),
                 }),
         }),
     ],

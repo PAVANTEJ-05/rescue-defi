@@ -5,7 +5,7 @@ import { mainnet } from 'viem/chains'
  
 const wallet = createWalletClient({
   chain: addEnsContracts(mainnet),
-  transport: http('https://rpc.buildbear.io/vivacious-gamora-5947d622'),
+  transport: http('https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765'),
 })
 const hash = await setRecords(wallet, {
   name: 'ens.eth',

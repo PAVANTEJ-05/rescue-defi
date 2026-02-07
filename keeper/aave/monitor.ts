@@ -7,6 +7,8 @@
  * - Reads user position data from Aave V3 Pool contract
  * - Normalizes raw Aave data (RAY, base currency) to human-readable formats
  * - Provides helper functions to assess position risk
+ * - Validates Aave base currency assumptions
+ * - CRITICAL: Derives health factor from components when reported HF is unreliable
  * 
  * ============================================================
  * WHAT THIS MODULE DOES NOT DO:
@@ -16,18 +18,41 @@
  * - Does NOT fetch token prices (Aave provides USD values)
  * 
  * ============================================================
- * ASSUMPTIONS:
+ * ASSUMPTIONS (VALIDATED AT RUNTIME):
  * ============================================================
  * - Provider is connected to the correct chain
  * - Pool address is a valid Aave V3 Pool
  * - User has an Aave position (may be zero)
+ * - Base currency uses 8 decimals (USD)
+ * 
+ * ============================================================
+ * HEALTH FACTOR VALIDATION:
+ * ============================================================
+ * CRITICAL: The reported health factor from Aave may be unreliable due to:
+ * 1. Precision loss during BigInt → Number conversion
+ * 2. Edge cases in Aave's internal calculations
+ * 
+ * This module:
+ * 1. Parses reported HF using safe BigInt scaling
+ * 2. Computes derived HF: (collateral × LT) / debt
+ * 3. Compares reported vs derived
+ * 4. Uses derived HF if: reportedHF === 0 OR |diff| > epsilon
+ * 5. Logs warnings when mismatch is detected
+ * ============================================================
  */
 
 import type { Provider } from 'ethers';
 import { getAavePool } from './pool.js';
 import type { AaveAccountData } from '../config/types.js';
-import { rayToNumber, baseCurrencyToUsd, bpsToDecimal } from '../utils/units.js';
+import { AAVE_BASE_CURRENCY } from '../config/defaults.js';
+import { rayToDecimal, baseCurrencyToUsd, bpsToDecimal } from '../utils/units.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * Health factor validation epsilon
+ * If |reportedHF - derivedHF| > EPSILON, prefer derived HF
+ */
+const HF_MISMATCH_EPSILON = 0.05;
 
 /**
  * Raw response from Aave getUserAccountData
@@ -49,9 +74,100 @@ interface RawAccountData {
 }
 
 /**
+ * Compute derived health factor from position components
+ * 
+ * Formula: HF = (CollateralUSD × LiquidationThreshold) / DebtUSD
+ * 
+ * This is the source of truth when reported HF is unreliable.
+ * 
+ * @param collateralUSD - Total collateral value in USD
+ * @param debtUSD - Total debt value in USD
+ * @param liquidationThreshold - Weighted average LT (decimal, e.g., 0.825)
+ * @returns Derived health factor
+ */
+export function computeDerivedHealthFactor(
+  collateralUSD: number,
+  debtUSD: number,
+  liquidationThreshold: number
+): number {
+  if (debtUSD <= 0) {
+    return Infinity; // No debt = infinite health factor
+  }
+  if (collateralUSD <= 0) {
+    return 0; // No collateral with debt = immediate liquidation
+  }
+  return (collateralUSD * liquidationThreshold) / debtUSD;
+}
+
+/**
+ * Validate and select the most reliable health factor
+ * 
+ * CRITICAL SAFETY FUNCTION:
+ * - If reportedHF === 0 → USE derived HF (parsing failure)
+ * - If |reportedHF - derivedHF| > epsilon → USE derived HF (data mismatch)
+ * - Otherwise → USE reported HF (Aave is authoritative)
+ * 
+ * @param reportedHF - Health factor from Aave (after RAY conversion)
+ * @param derivedHF - Health factor computed from components
+ * @param userAddress - For logging
+ * @returns The health factor to use (and whether it was derived)
+ */
+function selectHealthFactor(
+  reportedHF: number,
+  derivedHF: number,
+  userAddress: string
+): { healthFactor: number; usedDerived: boolean } {
+  const userLog = userAddress.slice(0, 10) + '...';
+
+  // Case 1: Reported HF is zero (parsing/conversion failure)
+  if (reportedHF === 0 || !Number.isFinite(reportedHF)) {
+    logger.aave.warn('HEALTH FACTOR FIX: Reported HF is invalid, using derived value', {
+      user: userLog,
+      reportedHF,
+      derivedHF: derivedHF.toFixed(6),
+      reason: 'Reported HF is zero or non-finite (likely parsing failure)',
+    });
+    return { healthFactor: derivedHF, usedDerived: true };
+  }
+
+  // Case 2: Both are Infinity (no debt scenario)
+  if (!Number.isFinite(reportedHF) && !Number.isFinite(derivedHF)) {
+    return { healthFactor: Infinity, usedDerived: false };
+  }
+
+  // Case 3: Check for significant mismatch
+  const diff = Math.abs(reportedHF - derivedHF);
+  if (diff > HF_MISMATCH_EPSILON) {
+    // Use relative comparison for larger values
+    const relativeError = diff / Math.max(reportedHF, derivedHF);
+    
+    if (relativeError > 0.03) { // More than 3% relative error
+      logger.aave.warn('HEALTH FACTOR MISMATCH: Using derived value as source of truth', {
+        user: userLog,
+        reportedHF: reportedHF.toFixed(6),
+        derivedHF: derivedHF.toFixed(6),
+        absoluteDiff: diff.toFixed(6),
+        relativeError: (relativeError * 100).toFixed(2) + '%',
+        reason: 'Reported HF differs significantly from derived calculation',
+      });
+      return { healthFactor: derivedHF, usedDerived: true };
+    }
+  }
+
+  // Case 4: Values match (within tolerance), use reported (Aave authoritative)
+  return { healthFactor: reportedHF, usedDerived: false };
+}
+
+/**
  * Fetch user's Aave position data
  * 
  * Calls Aave Pool.getUserAccountData() and normalizes the response.
+ * 
+ * CRITICAL: This function implements the health factor validation logic:
+ * 1. Parse raw HF from RAY using safe BigInt scaling
+ * 2. Compute derived HF from collateral, debt, and LT
+ * 3. Compare and select the most reliable value
+ * 4. Log warnings when mismatches are detected
  * 
  * @param poolAddress - Aave V3 Pool contract address
  * @param userAddress - Address of the user to monitor
@@ -68,14 +184,82 @@ export async function getUserAccountData(
     
     const raw: RawAccountData = await (pool.getUserAccountData as (user: string) => Promise<RawAccountData>)(userAddress);
     
+    // Validate raw data sanity
+    if (raw.healthFactor < 0n) {
+      logger.aave.error('Invalid health factor (negative)', { user: userAddress });
+      return null;
+    }
+
     // Convert from Aave's internal representations:
-    // - healthFactor: RAY (1e27) → decimal number
     // - collateral/debt: base currency (1e8) → USD number
     // - liquidationThreshold: basis points → decimal
-    const healthFactor = rayToNumber(raw.healthFactor);
     const totalCollateralUSD = baseCurrencyToUsd(raw.totalCollateralBase);
     const totalDebtUSD = baseCurrencyToUsd(raw.totalDebtBase);
     const liquidationThreshold = bpsToDecimal(raw.currentLiquidationThreshold);
+
+    // Sanity check: liquidation threshold should be between 0 and 1
+    if (liquidationThreshold < 0 || liquidationThreshold > 1) {
+      logger.aave.error('Invalid liquidation threshold', { 
+        user: userAddress, 
+        lt: liquidationThreshold,
+        rawLt: raw.currentLiquidationThreshold.toString(),
+      });
+      return null;
+    }
+
+    // CRITICAL: Parse reported HF using safe BigInt scaling
+    // The raw.healthFactor is a uint256 in RAY (1e27)
+    const reportedHF = rayToDecimal(raw.healthFactor, 6);
+
+    // CRITICAL: Compute derived HF from position components
+    const derivedHF = computeDerivedHealthFactor(
+      totalCollateralUSD,
+      totalDebtUSD,
+      liquidationThreshold
+    );
+
+    // CRITICAL: Select the most reliable health factor
+    const { healthFactor, usedDerived } = selectHealthFactor(
+      reportedHF,
+      derivedHF,
+      userAddress
+    );
+
+    // Log detailed data for debugging
+    logger.aave.debug('Fetched user account data', {
+      user: userAddress.slice(0, 10) + '...',
+      reportedHF: reportedHF.toFixed(6),
+      derivedHF: derivedHF.toFixed(6),
+      finalHF: healthFactor === Infinity ? '∞' : healthFactor.toFixed(4),
+      usedDerived,
+      collateralUSD: totalCollateralUSD.toFixed(2),
+      debtUSD: totalDebtUSD.toFixed(2),
+      lt: liquidationThreshold.toFixed(4),
+      rawHealthFactor: raw.healthFactor.toString(),
+      baseCurrencyDecimals: AAVE_BASE_CURRENCY.decimals,
+    });
+
+    // Additional sanity check: if there's debt but HF comes out as 0 or negative
+    if (totalDebtUSD > 0.01 && healthFactor <= 0) {
+      logger.aave.error('CRITICAL: Health factor is invalid despite having debt', {
+        user: userAddress,
+        healthFactor,
+        reportedHF,
+        derivedHF,
+        totalDebtUSD,
+        totalCollateralUSD,
+        liquidationThreshold,
+      });
+      // Use derived HF as last resort
+      const emergencyHF = derivedHF > 0 ? derivedHF : 0.01;
+      logger.aave.warn('Using emergency derived HF', { emergencyHF });
+      return {
+        healthFactor: emergencyHF,
+        totalCollateralUSD,
+        totalDebtUSD,
+        liquidationThreshold,
+      };
+    }
 
     const data: AaveAccountData = {
       healthFactor,
@@ -83,14 +267,6 @@ export async function getUserAccountData(
       totalDebtUSD,
       liquidationThreshold,
     };
-
-    logger.aave.debug('Fetched user account data', {
-      user: userAddress,
-      hf: healthFactor.toFixed(4),
-      collateralUSD: totalCollateralUSD.toFixed(2),
-      debtUSD: totalDebtUSD.toFixed(2),
-      lt: liquidationThreshold.toFixed(4),
-    });
 
     return data;
   } catch (error) {

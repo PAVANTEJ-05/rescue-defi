@@ -8,28 +8,69 @@
  * This module converts raw ENS text records (strings) into typed
  * RescuePolicy objects with validation.
  * 
+ * PRODUCTION SAFETY:
+ * - rescue.enabled MUST be "true" for rescues to execute
+ * - Only stablecoins are allowed (no price oracle required)
+ * - Capped rescues that don't restore HF are REJECTED upstream
+ * 
  * VALIDATION RULES:
+ * - enabled must be explicitly "true"
  * - minHF must be between 1.0 and 2.0
  * - targetHF must be between 1.1 and 3.0
  * - targetHF must be > minHF
  * - maxAmountUSD must be between 1 and 100,000
  * - cooldownSeconds must be between 60 and 604800 (7 days)
+ * - allowedTokens must only contain stablecoins
  * 
- * DEFAULTS:
- * - Used when ENS records are missing (demo mode)
- * - Conservative values for safety
- * - See config/defaults.ts for values
+ * ============================================================
+ * DEFAULT_POLICY FALLBACK BEHAVIOR:
+ * ============================================================
+ * 
+ * CRITICAL: This module ALWAYS falls back to DEFAULT_POLICY when ENS
+ * config is missing, unreadable, or empty.
+ * 
+ * Rules:
+ * - If ENS config exists → use ENS values (after bounds validation)
+ * - If ENS config does NOT exist → use DEFAULT_POLICY
+ * - enabled field must ALWAYS be explicitly checked by caller
+ * - If enabled === false → skip rescue (even with valid config)
+ * - If enabled === true → rescue allowed (if other conditions met)
+ * 
+ * The DEFAULT_POLICY is imported from config/defaults.ts:
+ * - enabled: false (MUST be explicitly enabled via ENS)
+ * - minHF: 1.2
+ * - targetHF: 1.5
+ * - maxAmountUSD: 100000
+ * - cooldownSeconds: 300
+ * - allowedTokens: ['USDC', 'USDT', 'DAI']
+ * - allowedChains: [1, 10, 8453]
  * 
  * ============================================================
  */
 
 import type { RescuePolicy } from '../config/types.js';
-import { DEFAULT_POLICY, POLICY_BOUNDS } from '../config/defaults.js';
+import { DEFAULT_POLICY, POLICY_BOUNDS, isStablecoin } from '../config/defaults.js';
 import { ENS_KEYS, type RawEnsConfig } from './reader.js';
+import { logger } from '../utils/logger.js';
 
 // ============================================================
 // PARSING FUNCTIONS
 // ============================================================
+
+/**
+ * Parse a boolean string with strict validation
+ * 
+ * @param value - String value from ENS
+ * @param fallback - Default value if parsing fails
+ * @returns Parsed boolean (only "true" = true)
+ */
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === '') {
+    return fallback;
+  }
+  // Only exact match "true" enables rescue
+  return value.toLowerCase() === 'true';
+}
 
 /**
  * Parse a numeric string with validation
@@ -52,17 +93,17 @@ function parseNumber(
 
   const parsed = parseFloat(value);
   if (isNaN(parsed)) {
-    console.warn(`Invalid number value: ${value}, using fallback: ${fallback}`);
+    logger.ens.warn(`Invalid number value: ${value}, using fallback: ${fallback}`);
     return fallback;
   }
 
   // Clamp to bounds
   if (parsed < min) {
-    console.warn(`Value ${parsed} below minimum ${min}, clamping`);
+    logger.ens.warn(`Value ${parsed} below minimum ${min}, clamping`);
     return min;
   }
   if (parsed > max) {
-    console.warn(`Value ${parsed} above maximum ${max}, clamping`);
+    logger.ens.warn(`Value ${parsed} above maximum ${max}, clamping`);
     return max;
   }
 
@@ -72,7 +113,7 @@ function parseNumber(
 /**
  * Parse a comma-separated string into array of strings
  * 
- * @param value - Comma-separated string (e.g., "USDC,ETH,DAI")
+ * @param value - Comma-separated string (e.g., "USDC,USDT,DAI")
  * @param fallback - Default array if parsing fails
  * @returns Array of trimmed strings
  */
@@ -83,8 +124,38 @@ function parseStringArray(value: string | undefined, fallback: string[]): string
 
   return value
     .split(',')
-    .map((s) => s.trim())
+    .map((s) => s.trim().toUpperCase())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * Filter tokens to only include supported stablecoins
+ * 
+ * CRITICAL: Non-stablecoins are rejected because we assume price = $1
+ * 
+ * @param tokens - Array of token symbols
+ * @returns Array of valid stablecoin symbols
+ */
+function filterStablecoinsOnly(tokens: string[]): string[] {
+  const stablecoins: string[] = [];
+  const rejected: string[] = [];
+
+  for (const token of tokens) {
+    if (isStablecoin(token)) {
+      stablecoins.push(token);
+    } else {
+      rejected.push(token);
+    }
+  }
+
+  if (rejected.length > 0) {
+    logger.ens.warn('Non-stablecoin tokens rejected from policy', {
+      rejected,
+      reason: 'Price assumption ($1) only valid for stablecoins',
+    });
+  }
+
+  return stablecoins;
 }
 
 /**
@@ -112,29 +183,126 @@ function parseNumberArray(value: string | undefined, fallback: number[]): number
 // ============================================================
 
 /**
+ * Check if rescue force-enable override is active via environment variable
+ * 
+ * SECURITY WARNING: This override should ONLY be used for:
+ * - Controlled testing environments
+ * - Emergency operations with explicit user consent
+ * 
+ * NEVER use in production without proper authorization.
+ * 
+ * @returns true if RESCUE_FORCE_ENABLE=true in environment
+ */
+export function isForceEnableOverrideActive(): boolean {
+  return process.env['RESCUE_FORCE_ENABLE'] === 'true';
+}
+
+/**
+ * Log security warning when force-enable override is used
+ */
+function logForceEnableWarning(): void {
+  logger.ens.warn('='.repeat(70));
+  logger.ens.warn('[SECURITY] Rescue force-enabled via environment override');
+  logger.ens.warn('[SECURITY] RESCUE_FORCE_ENABLE=true detected');
+  logger.ens.warn('[SECURITY] This should NEVER be used in production without user consent');
+  logger.ens.warn('='.repeat(70));
+}
+
+/**
+ * Determine effective enabled status considering all sources
+ * 
+ * Priority order:
+ * 1. ENS config present → ENS rescue.enabled controls enablement
+ * 2. ENS missing + RESCUE_FORCE_ENABLE=true → enabled with loud warning
+ * 3. ENS missing + no override → disabled (DEFAULT_POLICY.enabled = false)
+ * 
+ * @param ensEnabled - The enabled value from ENS (or default if ENS missing)
+ * @param hasEnsConfig - Whether ENS config was actually found
+ * @returns The effective enabled status
+ */
+function resolveEnabledStatus(ensEnabled: boolean, hasEnsConfig: boolean): boolean {
+  // If ENS config exists, it is authoritative
+  if (hasEnsConfig) {
+    return ensEnabled;
+  }
+
+  // ENS missing - check for force-enable override
+  if (isForceEnableOverrideActive()) {
+    logForceEnableWarning();
+    return true;
+  }
+
+  // No override - use default (false)
+  return DEFAULT_POLICY.enabled;
+}
+
+/**
  * Parse raw ENS config into typed RescuePolicy
  * 
  * This is the main parsing function. It:
  * 1. Extracts each field from raw config
  * 2. Validates and bounds numeric values
- * 3. Falls back to defaults for missing fields
+ * 3. ALWAYS falls back to DEFAULT_POLICY for missing fields
  * 4. Ensures policy is internally consistent
+ * 5. Filters tokens to stablecoins only
  * 
- * @param raw - Raw config from ENS (may be partial)
- * @param useFallbacks - If true, use defaults for missing values (demo mode)
- * @returns Parsed policy, or null if invalid and useFallbacks is false
+ * CRITICAL ENABLEMENT BEHAVIOR:
+ * - If ENS config exists → ENS rescue.enabled controls enablement
+ * - If ENS missing + RESCUE_FORCE_ENABLE=true → rescue enabled with warning
+ * - If ENS missing + no override → rescue disabled (safe default)
+ * 
+ * The caller MUST check policy.enabled before executing any rescue.
+ * 
+ * @param raw - Raw config from ENS (may be null or partial)
+ * @param _useFallbacks - DEPRECATED: Always uses fallbacks per requirements
+ * @returns Parsed policy (never null - always falls back to DEFAULT_POLICY)
  */
 export function parseEnsConfig(
   raw: RawEnsConfig | null,
-  useFallbacks: boolean = true
-): RescuePolicy | null {
-  // If no config and not using fallbacks, return null
-  if (!raw && !useFallbacks) {
-    return null;
+  _useFallbacks: boolean = false
+): RescuePolicy {
+  // ALWAYS use DEFAULT_POLICY as fallback base
+  // This ensures the keeper never blocks on missing ENS config
+  
+  // Log whether we're using ENS values or pure defaults
+  const hasAnyConfig = raw && Object.keys(raw).length > 0;
+  
+  if (!hasAnyConfig) {
+    // Check if force-enable override is active
+    const forceEnabled = isForceEnableOverrideActive();
+    
+    if (forceEnabled) {
+      logForceEnableWarning();
+      logger.ens.info('Using DEFAULT_POLICY with force-enabled override', {
+        enabled: true,
+        minHF: DEFAULT_POLICY.minHF,
+        targetHF: DEFAULT_POLICY.targetHF,
+        maxAmountUSD: DEFAULT_POLICY.maxAmountUSD,
+        source: 'RESCUE_FORCE_ENABLE environment variable',
+      });
+      // Return DEFAULT_POLICY with enabled=true
+      return { ...DEFAULT_POLICY, enabled: true };
+    }
+
+    logger.ens.info('No ENS config found, using DEFAULT_POLICY', {
+      enabled: DEFAULT_POLICY.enabled,
+      minHF: DEFAULT_POLICY.minHF,
+      targetHF: DEFAULT_POLICY.targetHF,
+      maxAmountUSD: DEFAULT_POLICY.maxAmountUSD,
+      note: 'Rescue will be skipped unless enabled=true is set via ENS or RESCUE_FORCE_ENABLE=true',
+    });
+    // Return a copy of DEFAULT_POLICY to prevent mutation
+    return { ...DEFAULT_POLICY };
   }
 
-  // Use empty object if null
+  // Use empty object if null for cleaner code
   const config = raw ?? {};
+
+  // Parse enabled flag - CRITICAL: defaults to DEFAULT_POLICY.enabled (false)
+  const enabled = parseBoolean(
+    config[ENS_KEYS.ENABLED],
+    DEFAULT_POLICY.enabled
+  );
 
   // Parse each field
   const minHF = parseNumber(
@@ -165,10 +333,21 @@ export function parseEnsConfig(
     POLICY_BOUNDS.cooldownSeconds.max
   );
 
-  const allowedTokens = parseStringArray(
+  // Parse and FILTER tokens to stablecoins only
+  const rawTokens = parseStringArray(
     config[ENS_KEYS.ALLOWED_TOKENS],
     DEFAULT_POLICY.allowedTokens
   );
+  const allowedTokens = filterStablecoinsOnly(rawTokens);
+
+  // If no valid stablecoins remain, use default stablecoins
+  if (allowedTokens.length === 0) {
+    logger.ens.warn('No valid stablecoins in policy, using defaults', {
+      requested: rawTokens,
+      defaults: DEFAULT_POLICY.allowedTokens,
+    });
+    allowedTokens.push(...DEFAULT_POLICY.allowedTokens);
+  }
 
   const allowedChains = parseNumberArray(
     config[ENS_KEYS.ALLOWED_CHAINS],
@@ -176,23 +355,17 @@ export function parseEnsConfig(
   );
 
   // Validation: targetHF must be > minHF
+  let finalTargetHF = targetHF;
   if (targetHF <= minHF) {
-    console.warn(`targetHF (${targetHF}) must be > minHF (${minHF}), adjusting`);
-    // Adjust targetHF to be at least minHF + 0.1
-    const adjustedTargetHF = Math.min(minHF + 0.3, POLICY_BOUNDS.targetHF.max);
-    return {
-      minHF,
-      targetHF: adjustedTargetHF,
-      maxAmountUSD,
-      cooldownSeconds,
-      allowedTokens,
-      allowedChains,
-    };
+    logger.ens.warn(`targetHF (${targetHF}) must be > minHF (${minHF}), adjusting`);
+    // Adjust targetHF to be at least minHF + 0.3
+    finalTargetHF = Math.min(minHF + 0.3, POLICY_BOUNDS.targetHF.max);
   }
 
   return {
+    enabled,
     minHF,
-    targetHF,
+    targetHF: finalTargetHF,
     maxAmountUSD,
     cooldownSeconds,
     allowedTokens,
@@ -239,6 +412,11 @@ export function isTokenAllowed(symbol: string, policy: RescuePolicy): boolean {
 export function validatePolicy(policy: RescuePolicy): string[] {
   const errors: string[] = [];
 
+  // Check enabled flag
+  if (!policy.enabled) {
+    errors.push('Rescue is not enabled (rescue.enabled must be "true")');
+  }
+
   // Check bounds
   if (policy.minHF < POLICY_BOUNDS.minHF.min || policy.minHF > POLICY_BOUNDS.minHF.max) {
     errors.push(`minHF ${policy.minHF} out of bounds [${POLICY_BOUNDS.minHF.min}, ${POLICY_BOUNDS.minHF.max}]`);
@@ -265,6 +443,12 @@ export function validatePolicy(policy: RescuePolicy): string[] {
     errors.push('allowedTokens cannot be empty');
   }
 
+  // Validate all tokens are stablecoins
+  const nonStablecoins = policy.allowedTokens.filter(t => !isStablecoin(t));
+  if (nonStablecoins.length > 0) {
+    errors.push(`Non-stablecoin tokens not allowed: ${nonStablecoins.join(', ')}`);
+  }
+
   if (policy.allowedChains.length === 0) {
     errors.push('allowedChains cannot be empty');
   }
@@ -281,6 +465,7 @@ export function validatePolicy(policy: RescuePolicy): string[] {
 export function formatPolicy(policy: RescuePolicy): string {
   return [
     `Rescue Policy:`,
+    `  Enabled: ${policy.enabled}`,
     `  Min HF: ${policy.minHF}`,
     `  Target HF: ${policy.targetHF}`,
     `  Max Amount: $${policy.maxAmountUSD}`,

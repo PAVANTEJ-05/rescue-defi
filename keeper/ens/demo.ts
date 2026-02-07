@@ -46,7 +46,7 @@ import { normalize } from 'viem/ens';
  * Fork RPC URL
  * Must be a mainnet fork with impersonation support (Anvil)
  */
-const FORK_RPC = 'http://127.0.0.1:8546';
+const FORK_RPC = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765';
 
 /**
  * ENS name to use for demo

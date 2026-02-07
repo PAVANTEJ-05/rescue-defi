@@ -178,11 +178,11 @@ async function main() {
   // Initialize LI.FI SDK
   initializeLiFiConfig();
 
-  // Impersonate the demo account on mainnet fork
-  await mainnetTestClient.impersonateAccount({
-    address: DEMO_FROM_ADDRESS as `0x${string}`,
-  });
-  console.log(`Impersonating: ${DEMO_FROM_ADDRESS}`);
+  // // Impersonate the demo account on mainnet fork
+  // await mainnetTestClient.impersonateAccount({
+  //   address: DEMO_FROM_ADDRESS as `0x${string}`,
+  // });
+  // console.log(`Impersonating: ${DEMO_FROM_ADDRESS}`);
 
   // ============================================================
   // CONTRACT CALLS QUOTE EXECUTION
@@ -221,7 +221,7 @@ async function main() {
   console.log('  Amount: 8.5 USDC');
 
   const contractCallQuote = await getContractCallsQuote(contractCallsQuoteRequest);
-  console.log('\nQuote received:');
+  console.log('\nQuote received:', contractCallQuote);
   console.log('  Route ID:', (contractCallQuote as any).id || 'N/A');
   console.log('  Tool:', (contractCallQuote as any).tool || 'N/A');
 

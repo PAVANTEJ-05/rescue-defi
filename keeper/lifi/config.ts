@@ -52,7 +52,7 @@ import { arbitrum, mainnet, optimism, polygon, base } from 'viem/chains';
  * 
  * Start with: anvil --fork-url <MAINNET_RPC> --port 8546
  */
-const LOCAL_FORK_URL = 'http://127.0.0.1:8546';
+const LOCAL_FORK_URL = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765';
 
 /**
  * Tenderly Virtual Testnet URL for Base

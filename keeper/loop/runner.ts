@@ -53,6 +53,8 @@ interface RunnerStats {
   totalRescues: number;
   /** Total errors encountered */
   totalErrors: number;
+  /** Total users skipped */
+  totalSkipped: number;
   /** Time runner started */
   startedAt: Date;
 }
@@ -124,6 +126,7 @@ export async function runForever(config: RunnerConfig): Promise<void> {
     totalTicks: 0,
     totalRescues: 0,
     totalErrors: 0,
+    totalSkipped: 0,
     startedAt: new Date(),
   };
 
@@ -156,6 +159,7 @@ export async function runForever(config: RunnerConfig): Promise<void> {
       stats.totalTicks++;
       stats.totalRescues += result.rescuesSucceeded;
       stats.totalErrors += result.errors.size;
+      stats.totalSkipped += result.usersSkipped;
 
       // Log periodic stats (every 10 ticks)
       if (stats.totalTicks % 10 === 0) {
@@ -165,6 +169,7 @@ export async function runForever(config: RunnerConfig): Promise<void> {
           ticks: stats.totalTicks,
           rescues: stats.totalRescues,
           errors: stats.totalErrors,
+          skipped: stats.totalSkipped,
           uptimeHours,
         });
       }

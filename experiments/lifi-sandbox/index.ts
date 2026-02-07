@@ -173,7 +173,7 @@ createConfig({
 });
 const publicClient = createPublicClient({
   chain: mainnet,
-  transport: http('https://rpc.buildbear.io/vivacious-gamora-5947d622'),
+  transport: http('https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765'),
 })
 // Main Execution Function
 async function main() {

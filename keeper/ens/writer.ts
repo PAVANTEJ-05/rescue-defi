@@ -47,7 +47,7 @@ import { ENS_KEYS } from './reader.js';
 /**
  * Default mainnet fork URL
  */
-const DEFAULT_MAINNET_RPC = 'http://127.0.0.1:8546';
+const DEFAULT_MAINNET_RPC = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765';
 
 /**
  * Public ENS resolver address (mainnet)
@@ -108,6 +108,7 @@ interface TextRecord {
  */
 export function policyToTextRecords(policy: RescuePolicy): TextRecord[] {
   return [
+    { key: ENS_KEYS.ENABLED, value: policy.enabled.toString() },
     { key: ENS_KEYS.MIN_HF, value: policy.minHF.toString() },
     { key: ENS_KEYS.TARGET_HF, value: policy.targetHF.toString() },
     { key: ENS_KEYS.MAX_AMOUNT, value: policy.maxAmountUSD.toString() },

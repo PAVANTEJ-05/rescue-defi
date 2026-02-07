@@ -42,8 +42,11 @@ import type { Provider } from 'ethers';
  * 
  * These are the standard keys that Rescue.ETH reads from ENS.
  * Users must set these records on their ENS name to configure rescues.
+ * 
+ * CRITICAL: rescue.enabled MUST be "true" for any rescue to execute.
  */
 export const ENS_KEYS = {
+  ENABLED: 'rescue.enabled',      // REQUIRED: Must be "true" to enable
   MIN_HF: 'rescue.minHF',
   TARGET_HF: 'rescue.targetHF',
   MAX_AMOUNT: 'rescue.maxAmount',
@@ -68,6 +71,7 @@ export const ALL_ENS_KEYS = Object.values(ENS_KEYS);
  * See parser.ts for conversion to typed RescuePolicy.
  */
 export interface RawEnsConfig {
+  [ENS_KEYS.ENABLED]?: string;
   [ENS_KEYS.MIN_HF]?: string;
   [ENS_KEYS.TARGET_HF]?: string;
   [ENS_KEYS.MAX_AMOUNT]?: string;
@@ -86,7 +90,7 @@ export interface RawEnsConfig {
  * For demo/testing, this should point to a local Anvil fork.
  * For production, use a real mainnet RPC.
  */
-const DEFAULT_MAINNET_RPC = 'http://127.0.0.1:8546';
+const DEFAULT_MAINNET_RPC = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765';
 
 /**
  * Create a viem public client for ENS reads

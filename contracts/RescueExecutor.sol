@@ -2,15 +2,21 @@
 pragma solidity ^0.8.20;
 
 /*//////////////////////////////////////////////////////////////
-                            INTERFACE
+                        SAFE ERC20 INTERFACE
 //////////////////////////////////////////////////////////////*/
 
 interface IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+
     function transferFrom(
         address from,
         address to,
         uint256 amount
     ) external returns (bool);
+
+    function approve(address spender, uint256 amount)
+        external
+        returns (bool);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -24,19 +30,26 @@ contract RescueExecutor {
 
     error OnlyKeeper();
     error CooldownActive(uint256 remaining);
-    error CallFailed();
     error InvalidTarget();
+    error ERC20TransferFailed();
+    error ERC20ApproveFailed();
+    error LiFiCallFailed();
+    error ResidualBalance();
 
     /*//////////////////////////////////////////////////////////////
                               STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    address public immutable keeper;          // your dummy keeper wallet
-    address public immutable lifiRouter;      // official LI.FI router
+    /// @notice Off-chain keeper / bot
+    address public immutable keeper;
 
+    /// @notice Official LI.FI router address
+    address public immutable lifiRouter;
+
+    /// @notice Cooldown in seconds (per user)
     uint256 public immutable COOLDOWN_SECONDS;
 
-    // cooldown tracked PER USER (not keeper)
+    /// @notice Last rescue timestamp per user
     mapping(address => uint256) public lastRescueAt;
 
     /*//////////////////////////////////////////////////////////////
@@ -88,19 +101,20 @@ contract RescueExecutor {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @notice Executes a LI.FI transaction exactly as provided by keeper
+     * @notice Executes an atomic LI.FI rescue flow
      *
-     * @param user      User whose funds are used and position is rescued
-     * @param tokenIn   ERC20 token address OR address(0) for ETH
-     * @param amountIn Amount of ERC20 to pull (ignored for ETH)
-     * @param target   Must be LI.FI router address
-     * @param callData Exact calldata returned by LI.FI API
+     * FLOW (single transaction):
+     * 1. Pull ERC20 from user
+     * 2. Approve LI.FI router
+     * 3. Execute LI.FI calldata (swap / bridge / repay)
+     * 4. Cleanup approval
+     *
+     * If ANY step fails → entire tx reverts → user keeps funds
      */
     function executeRescue(
         address user,
         address tokenIn,
         uint256 amountIn,
-        address target,
         bytes calldata callData
     )
         external
@@ -108,24 +122,55 @@ contract RescueExecutor {
         onlyKeeper
         cooldownPassed(user)
     {
-        // enforce trusted LI.FI target
-        if (target != lifiRouter) revert InvalidTarget();
+        // ------------------------------------------------------------------
+        // 1. Enforce trusted LI.FI target
+        // ------------------------------------------------------------------
+        address target = lifiRouter;
 
-        // update cooldown FIRST (replay-safe)
+        // ------------------------------------------------------------------
+        // 2. Update cooldown FIRST (reentrancy & replay safe)
+        // ------------------------------------------------------------------
         lastRescueAt[user] = block.timestamp;
 
-        // pull ERC20 from user if needed
+        // ------------------------------------------------------------------
+        // 3. Pull ERC20 from user
+        // ------------------------------------------------------------------
         if (tokenIn != address(0)) {
-            IERC20(tokenIn).transferFrom(
+            bool pulled = IERC20(tokenIn).transferFrom(
                 user,
                 address(this),
                 amountIn
             );
+            if (!pulled) revert ERC20TransferFailed();
+
+            // ------------------------------------------------------------------
+            // 4. Approve LI.FI router (exact amount)
+            // ------------------------------------------------------------------
+            bool resetOk = IERC20(tokenIn).approve(target, 0);
+            if (!resetOk) revert ERC20ApproveFailed();
+
+            bool approveOk = IERC20(tokenIn).approve(target, amountIn);
+            if (!approveOk) revert ERC20ApproveFailed();
         }
 
-        // forward exact LI.FI call
+        // ------------------------------------------------------------------
+        // 5. Execute LI.FI calldata
+        // ------------------------------------------------------------------
         (bool success, ) = target.call{ value: msg.value }(callData);
-        if (!success) revert CallFailed();
+        if (!success) revert LiFiCallFailed();
+
+        // ------------------------------------------------------------------
+        // 6. Cleanup approvals & ensure no residual balance
+        // ------------------------------------------------------------------
+        if (tokenIn != address(0)) {
+            // remove approval
+            IERC20(tokenIn).approve(target, 0);
+
+            // enforce invariant: executor must not keep funds
+            if (IERC20(tokenIn).balanceOf(address(this)) != 0) {
+                revert ResidualBalance();
+            }
+        }
 
         emit RescueExecuted(
             user,
@@ -136,7 +181,7 @@ contract RescueExecutor {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        RECEIVE ETH (BRIDGES)
+                        RECEIVE ETH (OPTIONAL)
     //////////////////////////////////////////////////////////////*/
 
     receive() external payable {}
