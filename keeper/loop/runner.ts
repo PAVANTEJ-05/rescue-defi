@@ -99,6 +99,13 @@ export function isShutdownRequested(): boolean {
   return shutdownRequested;
 }
 
+/**
+ * Reset shutdown flag (for testing or re-entry)
+ */
+export function resetShutdown(): void {
+  shutdownRequested = false;
+}
+
 // ============================================================
 // RUNNER
 // ============================================================
@@ -120,6 +127,9 @@ export function isShutdownRequested(): boolean {
  */
 export async function runForever(config: RunnerConfig): Promise<void> {
   const { pollIntervalMs, tickContext } = config;
+
+  // Reset shutdown flag in case of re-entry
+  resetShutdown();
 
   // Initialize stats
   const stats: RunnerStats = {

@@ -2,87 +2,34 @@
  * LI.FI Transaction Execution for Rescue.ETH
  * 
  * ============================================================
- * DEMO-ONLY / FORK ENVIRONMENT
+ * PRODUCTION MODULE
  * ============================================================
- * This module handles the actual transaction submission for LI.FI quotes.
+ * This module handles rescue execution through the RescueExecutor
+ * smart contract. The keeper calls executeRescue() which:
  * 
- * IMPORTANT NOTES:
- * 1. Gas fields are STRIPPED from transactions to let viem/local node estimate
- *    This is required because fork gas estimates differ from mainnet
+ * 1. Pulls ERC20 tokens from user via transferFrom (requires approval)
+ * 2. Approves the immutable lifiRouter for exact amount
+ * 3. Forwards LiFi callData to lifiRouter (bridge + Aave supply)
+ * 4. Clears remaining approval
+ * 5. Verifies zero residual token balance
  * 
- * 2. Transactions are submitted to LOCAL FORKS, not real networks
- *    Real bridges/relayers cannot see these transactions
+ * GAS HANDLING:
+ * - Gas is estimated via eth_estimateGas before submission
+ * - A 20% buffer is added to the estimate for safety
+ * - If gas estimation fails, the error is parsed for specific failure reasons
+ *   (approval, cooldown, keeper auth, LiFi call, invalid target, residual balance)
  * 
- * 3. After execution on source chain, bridge simulation is required
- *    (See simulate.ts for manual token delivery on destination)
- * 
- * PRODUCTION DIFFERENCES:
- * - Keep gas fields or let wallet estimate
- * - Real bridge relayers will complete the cross-chain transfer
- * - No manual simulation needed
+ * ERROR HANDLING:
+ * - All errors are caught and returned as structured RescueResult
+ * - The keeper NEVER crashes on a rescue failure — it logs and moves to the next user
  * ============================================================
  */
 
 import type { Signer } from 'ethers';
 import { Contract } from 'ethers';
 import type { LiFiQuoteResponse, ExecuteParams } from './types.js';
-import { getWalletClientForChain, getPublicClientForChain } from './config.js';
 import type { RescueResult } from '../config/types.js';
 import { logger } from '../utils/logger.js';
-
-// ============================================================
-// TRANSACTION EXECUTION
-// ============================================================
-
-/**
- * Execute a LI.FI transaction on a forked network
- * 
- * This function:
- * 1. Gets the appropriate wallet/public clients for the source chain
- * 2. Strips gas fields to let local node estimate (fork-specific)
- * 3. Submits the transaction
- * 4. Waits for confirmation
- * 
- * @param chainId - Source chain ID
- * @param transactionRequest - Full transaction request from LI.FI quote
- * @returns Transaction hash and receipt
- */
-export async function executeTransaction(
-  chainId: number,
-  transactionRequest: any
-): Promise<{ hash: string; blockNumber: bigint }> {
-  const walletClient = getWalletClientForChain(chainId);
-  const publicClient = getPublicClientForChain(chainId);
-
-  // Strip gas fields - let viem/local node estimate
-  // This is REQUIRED for fork environments where gas estimates differ
-  const {
-    gas,
-    gasPrice,
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-    ...txRequest
-  } = transactionRequest;
-
-  console.log('Submitting transaction to fork...');
-  console.log('  To:', txRequest.to);
-  console.log('  Value:', txRequest.value?.toString() ?? '0');
-  console.log('  Data length:', txRequest.data?.length ?? 0);
-
-  // Submit transaction
-  const hash = await walletClient.sendTransaction(txRequest);
-  console.log(`Transaction submitted: ${hash}`);
-
-  // Wait for confirmation
-  console.log('Waiting for confirmation...');
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`Confirmed in block ${receipt.blockNumber}`);
-
-  return {
-    hash,
-    blockNumber: receipt.blockNumber,
-  };
-}
 
 // ============================================================
 // COOLDOWN TRACKING
@@ -90,9 +37,12 @@ export async function executeTransaction(
 
 /**
  * RescueExecutor contract ABI for cooldown checks
+ * 
+ * CRITICAL: Must match deployed RescueExecutor.sol
+ * The contract uses `lastRescueAt` (not `lastRescueTime`).
  */
 const RESCUE_EXECUTOR_ABI = [
-  'function lastRescueTime(address user) view returns (uint256)',
+  'function lastRescueAt(address user) view returns (uint256)',
 ] as const;
 
 /**
@@ -131,8 +81,8 @@ export async function checkCooldownInfo(
 ): Promise<CooldownInfo> {
   try {
     const executor = new Contract(executorAddress, RESCUE_EXECUTOR_ABI, signer);
-    const lastRescueTimeFn = executor.getFunction('lastRescueTime');
-    const lastRescueTime = await lastRescueTimeFn(userAddress);
+    const lastRescueAtFn = executor.getFunction('lastRescueAt');
+    const lastRescueTime = await lastRescueAtFn(userAddress);
     
     const lastTime = Number(lastRescueTime);
     const now = Math.floor(Date.now() / 1000);
@@ -176,10 +126,21 @@ export async function isCooldownPassed(
 
 /**
  * RescueExecutor contract ABI for rescue execution
+ * 
+ * CRITICAL: This ABI MUST match the deployed RescueExecutor.sol exactly.
+ * The contract's `executeRescue` takes 4 params: (user, tokenIn, amountIn, callData).
+ * The lifiRouter address is an immutable set in the constructor — it is NOT passed per-call.
+ * The `callData` arg is the raw LiFi transactionRequest.data from getContractCallsQuote.
+ * The contract forwards it via: lifiRouter.call{value: msg.value}(callData)
+ * 
+ * Source of truth: contracts/RescueExecutor.sol and lifi/newexecute.ts
  */
 const RESCUE_EXECUTOR_FULL_ABI = [
-  'function lastRescueTime(address user) view returns (uint256)',
-  'function executeRescue(address user, address tokenIn, uint256 amountIn, address lifiTarget, bytes calldata lifiData, uint256 lifiValue) payable',
+  'function lastRescueAt(address user) view returns (uint256)',
+  'function executeRescue(address user, address tokenIn, uint256 amountIn, bytes callData) payable',
+  'function keeper() view returns (address)',
+  'function lifiRouter() view returns (address)',
+  'function COOLDOWN_SECONDS() view returns (uint256)',
 ] as const;
 
 /**
@@ -245,13 +206,13 @@ export async function executeRescue(
     let gasEstimate: bigint | undefined;
     try {
       const executeRescueFn = executor.getFunction('executeRescue');
+      // 4 args matching contract: (user, tokenIn, amountIn, callData)
+      // callData = raw LiFi transactionRequest.data, forwarded to lifiRouter
       gasEstimate = await executeRescueFn.estimateGas(
         userAddress,
         tokenIn,
         amountIn,
-        quote.to,
         quote.data,
-        BigInt(quote.value),
         {
           value: BigInt(quote.value),
         }
@@ -302,6 +263,46 @@ export async function executeRescue(
         };
       }
 
+      // Contract-specific errors from RescueExecutor.sol
+      if (gasErrorMsg.includes('LiFiCallFailed')) {
+        logger.executor.error('Gas estimation failed - LiFi call would fail', {
+          user: userLog,
+          error: gasErrorMsg,
+          suggestion: 'LiFi router may be stale, diamond facet missing, or calldata invalid',
+        });
+        return {
+          success: false,
+          error: 'LIFI_CALL_FAILED: LiFi router call would fail - check router/facet status',
+          amountUSD,
+          timestamp: Date.now(),
+        };
+      }
+
+      if (gasErrorMsg.includes('InvalidTarget')) {
+        logger.executor.error('Gas estimation failed - invalid target', {
+          user: userLog,
+        });
+        return {
+          success: false,
+          error: 'INVALID_TARGET: Contract rejected the target address',
+          amountUSD,
+          timestamp: Date.now(),
+        };
+      }
+
+      if (gasErrorMsg.includes('ResidualBalance')) {
+        logger.executor.error('Gas estimation failed - residual balance detected', {
+          user: userLog,
+          note: 'Contract enforces zero residual balance after execution',
+        });
+        return {
+          success: false,
+          error: 'RESIDUAL_BALANCE: Tokens would remain in executor after rescue',
+          amountUSD,
+          timestamp: Date.now(),
+        };
+      }
+
       // Generic gas estimation failure
       logger.executor.error('Gas estimation failed', {
         user: userLog,
@@ -322,13 +323,14 @@ export async function executeRescue(
     });
 
     const executeRescueFn = executor.getFunction('executeRescue');
+    // 4 args matching contract: (user, tokenIn, amountIn, callData)
+    // The contract forwards callData to its immutable lifiRouter via:
+    //   lifiRouter.call{value: msg.value}(callData)
     const tx = await executeRescueFn(
       userAddress,
       tokenIn,
       amountIn,
-      quote.to,
       quote.data,
-      BigInt(quote.value),
       {
         value: BigInt(quote.value),
         // Add 20% buffer to gas estimate for safety
@@ -400,6 +402,23 @@ export async function executeRescue(
       logger.executor.error('Rescue failed - not keeper', {
         note: 'Check KEEPER_PRIVATE_KEY matches deployed contract keeper address',
       });
+    } else if (errorMessage.includes('LiFiCallFailed')) {
+      failureReason = 'LIFI_CALL_FAILED: LiFi router call failed on-chain';
+      logger.executor.error('Rescue failed - LiFi call failed', {
+        user: userLog,
+        note: 'Check fork freshness, diamond facet, or calldata validity',
+      });
+    } else if (errorMessage.includes('InvalidTarget')) {
+      failureReason = 'INVALID_TARGET: Contract rejected the target';
+      logger.executor.error('Rescue failed - invalid target', {
+        user: userLog,
+      });
+    } else if (errorMessage.includes('ResidualBalance')) {
+      failureReason = 'RESIDUAL_BALANCE: Tokens remained in executor';
+      logger.executor.error('Rescue failed - residual balance', {
+        user: userLog,
+        note: 'LiFi did not consume all tokens; potential slippage issue',
+      });
     } else if (errorMessage.includes('insufficient funds') || errorMessage.includes('INSUFFICIENT_FUNDS')) {
       failureReason = 'INSUFFICIENT_FUNDS: Keeper wallet has insufficient ETH for gas';
       logger.executor.error('Rescue failed - insufficient funds', {
@@ -432,40 +451,6 @@ export async function executeRescue(
       timestamp: Date.now(),
     };
   }
-}
-
-// ============================================================
-// ROUTE STEP EXECUTION (FROM ORIGINAL INDEX.TS)
-// ============================================================
-
-/**
- * Execute a single step of a LI.FI route
- * 
- * This is preserved from the original implementation.
- * Used for multi-step routes (multiple bridges/swaps).
- * 
- * NOTE: For Rescue.ETH, we primarily use contractCallsQuote which
- * bundles everything into a single transaction. This function is
- * kept for compatibility with standard LI.FI routes if needed.
- * 
- * @param step - Step information from route
- * @param getStepTransaction - LI.FI SDK function to get step tx data
- * @returns Execution result
- */
-export async function executeRouteStep(
-  step: any,
-  getStepTransaction: (step: any) => Promise<any>
-): Promise<{ hash: string; blockNumber: bigint }> {
-  // Get transaction data for the step
-  const stepWithTx = await getStepTransaction(step);
-  
-  if (!stepWithTx.transactionRequest) {
-    throw new Error('Missing transactionRequest for step');
-  }
-
-  // Execute on the source chain
-  const fromChainId = stepWithTx.action.fromChainId;
-  return executeTransaction(fromChainId, stepWithTx.transactionRequest);
 }
 
 // ============================================================

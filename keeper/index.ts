@@ -30,6 +30,7 @@
 
 import { JsonRpcProvider, Wallet } from 'ethers';
 import { config } from 'dotenv';
+import { createConfig as createLiFiConfig } from '@lifi/sdk';
 
 // Config
 import type { MonitoredUser } from './config/types.js';
@@ -140,20 +141,49 @@ function loadConfig(): KeeperConfig {
 /**
  * Load monitored users
  * 
- * In production, this would come from:
- * - A registry contract
- * - An off-chain database
- * - Event scanning
+ * Users can be configured via:
+ * - MONITORED_USERS env var: JSON array of {address, ensName} objects
+ *   Example: MONITORED_USERS='[{"address":"0x123...","ensName":"alice.eth"}]'
+ * - Hardcoded fallback (demo only, warns loudly)
  * 
- * For demo, users are hardcoded here.
+ * In production, implement one of:
+ * - A registry contract (on-chain discovery)
+ * - An off-chain database / API
+ * - Event scanning for approval events on the executor
  */
 function loadMonitoredUsers(): MonitoredUser[] {
-  // Demo users to monitor
-  // Add users here in format: { address: '0x...', ensName: 'user.eth' }
+  const envUsers = process.env['MONITORED_USERS'];
+  
+  if (envUsers) {
+    try {
+      const parsed = JSON.parse(envUsers) as MonitoredUser[];
+      if (!Array.isArray(parsed)) {
+        throw new Error('MONITORED_USERS must be a JSON array');
+      }
+      // Validate each user
+      for (const user of parsed) {
+        if (!user.address || !user.address.startsWith('0x') || user.address.length !== 42) {
+          throw new Error(`Invalid user address: ${user.address}`);
+        }
+        if (user.ensName === undefined) {
+          user.ensName = '';
+        }
+      }
+      logger.keeper.info('Loaded monitored users from MONITORED_USERS env var', {
+        count: parsed.length,
+      });
+      return parsed;
+    } catch (error) {
+      throw new Error(`Failed to parse MONITORED_USERS: ${error instanceof Error ? error.message : 'Unknown'}`);
+    }
+  }
+
+  // Fallback: hardcoded demo users (warn loudly)
+  logger.keeper.warn('MONITORED_USERS env var not set — using hardcoded demo list');
+  logger.keeper.warn('For production, set MONITORED_USERS as a JSON array');
+  
   const users: MonitoredUser[] = [
-    // Example:
     { address: '0xb87e30d0351dc5770541b3233e13c8cf810b287b', ensName: '' },
-   // { address: '0x5678...', ensName: 'bob.eth' },
   ];
 
   return users;
@@ -183,6 +213,12 @@ async function bootstrap(): Promise<void> {
     demoMode: keeperConfig.demoMode,
   });
 
+  // Initialize LI.FI SDK - required before calling getContractCallsQuote
+  // Only the integrator name is needed; RPC URLs are not required for API calls.
+  // The SDK uses its own routing API (li.quest) to compute quotes.
+  createLiFiConfig({ integrator: 'rescue-eth' });
+  logger.keeper.info('LI.FI SDK initialized');
+
   // PRODUCTION SAFETY WARNINGS
   if (keeperConfig.demoMode) {
     logger.keeper.warn('='.repeat(60));
@@ -198,7 +234,15 @@ async function bootstrap(): Promise<void> {
   // Setup providers
   const rpcUrl = keeperConfig.rpcUrl || chainConfig.rpcUrl;
   const provider = new JsonRpcProvider(rpcUrl);
-  const mainnetProvider = new JsonRpcProvider('https://eth.llamarpc.com'); // ENS always on mainnet
+  
+  // ENS is always on mainnet — use dedicated mainnet RPC
+  const mainnetRpcUrl = process.env['MAINNET_RPC_URL'] || 'https://eth.llamarpc.com';
+  const mainnetProvider = new JsonRpcProvider(mainnetRpcUrl);
+
+  if (!process.env['MAINNET_RPC_URL']) {
+    logger.keeper.warn('MAINNET_RPC_URL not set — using public fallback (https://eth.llamarpc.com)');
+    logger.keeper.warn('For production, set MAINNET_RPC_URL to a dedicated mainnet RPC endpoint');
+  }
 
   // Validate provider connections
   try {

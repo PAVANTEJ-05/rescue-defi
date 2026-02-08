@@ -1,3 +1,20 @@
+/**
+ * ============================================================
+ * LEGACY REFERENCE — DO NOT USE IN PRODUCTION
+ * ============================================================
+ * This test file mirrors the logic in lifi/newexecute.ts and was used
+ * to validate the correct 4-parameter `executeRescue` call on a
+ * forked Optimism environment.
+ *
+ * The correct logic has been extracted into the production modules:
+ *   - lifi/execute.ts  (correct ABI, 4-param call)
+ *   - lifi/quote.ts    (configurable Aave pool, toApprovalAddress)
+ *   - loop/tick.ts     (executorAddress as fromAddress)
+ *
+ * DO NOT modify this file. Preserved as audit reference.
+ * ============================================================
+ */
+
 import {
   createConfig,
   config,
@@ -40,6 +57,9 @@ const ETH_WHALE = privateKeyToAccount(
 ); // test whale private key
 const chains = [arbitrum, mainnet, optimism, polygon, base];
 // const USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+const AAVE_USER = "0xb789576d412aeec021fe01ded9541b272f472aab";
+
 const AAVE_POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
 const tokensByChain = {
   1: [
@@ -55,10 +75,10 @@ const tokensByChain = {
   10: [
     {
       chainId: 10,
-      address: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-      symbol: "USDC",
+      address: "0x4200000000000000000000000000000000000006",
+      symbol: "WETH",
       name: "op",
-      decimals: 6,
+      decimals: 18,
       priceUSD: "0.9999",
     },
     {
@@ -72,7 +92,6 @@ const tokensByChain = {
   ],
 };
 
-
 // 2. Helper factories for per-chain wallet/public clients
 // Keep the same account (ETH_WHALE) across chains for tests/forks.
 function getWalletClientForChain(chainId: number) {
@@ -80,7 +99,7 @@ function getWalletClientForChain(chainId: number) {
   const transport =
     chainId === ChainId.OPT
       ? http(
-          "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+          "http://127.0.0.1:8545",
         )
       : http();
 
@@ -95,7 +114,7 @@ function getPublicClientForChain(chainId: number) {
   const transport =
     chainId === ChainId.OPT
       ? http(
-          "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+          "http://127.0.0.1:8545",
         )
       : http("http://127.0.0.1:8545");
 
@@ -110,7 +129,7 @@ const baseTestClient = createTestClient({
   chain: base,
   mode: "anvil",
   transport: http(
-    "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+    "http://127.0.0.1:8545",
   ),
 })
   .extend(publicActions)
@@ -120,6 +139,8 @@ const baseTestClient = createTestClient({
 const mainnetWalletClient = getWalletClientForChain(ChainId.OPT);
 const mainnetPublicClient = getPublicClientForChain(ChainId.OPT);
 
+// const EXECUTOR_CONTRACT = "0x825794255ae3960f62de3fc3e0e94ee2a4887f73"; // original
+const EXECUTOR_CONTRACT = "0xa3730ab689e9e5e5d756f1d851e207b4317b3883";
 const WETH_BASE = "0x4200000000000000000000000000000000000006";
 const WETH_ABI = parseAbi([
   "function deposit() payable",
@@ -168,9 +189,9 @@ createConfig({
     [ChainId.BAS]: [
       "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
     ],
-        [ChainId.OPT]: [
-      "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
-    ]
+    [ChainId.OPT]: [
+      "http://127.0.0.1:8545",
+    ],
   },
   providers: [
     EVM({
@@ -221,7 +242,7 @@ const RESCUE_EXECUTOR_ABI = parseAbi([
   // =========================
   // Receive ETH
   // =========================
-  "receive() external payable"
+  "receive() external payable",
 ]);
 
 // Main Execution Function
@@ -230,42 +251,42 @@ async function main() {
     account: ETH_WHALE, // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING) ---(executor contract)
     chain: optimism,
     transport: http(
-      "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+      "http://127.0.0.1:8545",
     ),
   });
 
   // ================= CONTRACT CALL QUOTE AND EXECUTION OF TXN =================
   // Build calldata for the Aave supply call
-const calldata = encodeFunctionData({
-  abi: AAVE_POOL_ABI,
-  functionName: "supply",
-  args: [
-    OP_WETH,
-    BigInt(8500000000000),
-    "0xb87e30d0351dc5770541b3233e13c8cf810b287b",
-    0,
-  ], // refer abi code of aave to pass what arguments
-});
+  const calldata = encodeFunctionData({
+    abi: AAVE_POOL_ABI,
+    functionName: "supply",
+    args: [
+      OP_WETH,
+      BigInt(8500000000000),
+      "0xb87e30d0351dc5770541b3233e13c8cf810b287b",
+      0,
+    ], // refer abi code of aave to pass what arguments
+  });
 
   // Contract call quote transaction request (must be defined before use)
   const contractCallsQuoteRequest = {
-  fromAddress: "0xa3730ab689e9e5e5d756f1d851e207b4317b3883", // replace with contract address of executor_contract which keeper calls
-  fromChain: 10,
-  fromToken: OP_WETH,
-  toAmount: "8500000000000", // Must match fromAmount for same-chain contract calls
-  toChain: 10,
-  toToken: OP_WETH,
-  contractCalls: [
-    {
-      fromAmount: "8500000000000",
-      fromTokenAddress: OP_WETH,
-      toContractAddress: AAVE_POOL_ADDRESS,
-      toContractCallData: calldata,
-      toContractGasLimit: "500000",
-      toApprovalAddress: AAVE_POOL_ADDRESS,
-    },
-  ],
-};
+    fromAddress: EXECUTOR_CONTRACT, // replace with contract address of executor_contract which keeper calls
+    fromChain: 10,
+    fromToken: OP_WETH,
+    toAmount: "8500000000000", // Must match fromAmount for same-chain contract calls
+    toChain: 10,
+    toToken: OP_WETH,
+    contractCalls: [
+      {
+        fromAmount: "8500000000000",
+        fromTokenAddress: OP_WETH,
+        toContractAddress: AAVE_POOL_ADDRESS,
+        toContractCallData: calldata,
+        toContractGasLimit: "500000000",
+        toApprovalAddress: AAVE_POOL_ADDRESS,
+      },
+    ],
+  };
 
   // Contract call quote transaction request
   const contractCallQuote = await getContractCallsQuote(
@@ -280,24 +301,52 @@ const calldata = encodeFunctionData({
     contractCallQuote.transactionRequest as any;
   console.log("txn will be sent after this , txRequest:-----", txRequest);
 
-// Calldata for the contract call for aave
+  // ─────────────────────────────────────────────────────────────────────────
+  // OPTION A — Send the LiFi calldata DIRECTLY to the LiFi Diamond router
+  //            (bypasses RescueExecutor; good for verifying the LiFi quote
+  //             actually works on a FRESH fork with up-to-date facets)
+  // ─────────────────────────────────────────────────────────────────────────
+  // NOTE: The LiFi Diamond on Tenderly forks can be stale.  Selector
+  //       0xa83cbaa3 (or similar) may not be registered as a facet if the
+  //       fork was created before LiFi upgraded their diamond.
+  //       ➜  FIX: recreate the Tenderly fork so the diamond matches the
+  //              live chain, then this path will work.
 //   const transactionHash = await currentClient.sendTransaction(txRequest);
 
+//   console.log(`Transaction sent: ${transactionHash}`);
+
+//   console.log("Waiting for local confirmation...");
+//   const receipt = await currentPublicClient.waitForTransactionReceipt({
+//     hash: transactionHash,
+//   });
+//   console.log(`Transaction mined in block ${receipt.blockNumber}`);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // OPTION B — Route through RescueExecutor  (uncomment once the fork is
+  //            recreated so the LiFi Diamond has the required facets)
+  //
+  //  The RescueExecutor forwards `callData` to `lifiRouter` via:
+  //      target.call{value: msg.value}(callData)
+  //
+  //  `contractCallQuote.transactionRequest.data` IS the full calldata the
+  //  LiFi API expects to be sent to the Diamond.  So passing it as the
+  //  `callData` arg to executeRescue is correct — but only if the Diamond
+  //  on the fork actually has the facet for the selector in that data.
+  // ─────────────────────────────────────────────────────────────────────────
   const transactionHash = await currentClient.writeContract({
-    address: "0xa3730ab689e9e5e5d756f1d851e207b4317b3883",
+    address: EXECUTOR_CONTRACT,
     abi: RESCUE_EXECUTOR_ABI,
     functionName: "executeRescue",
     args: [
-      "0xb87e30d0351dc5770541b3233e13c8cf810b287b",
+      AAVE_USER,
       OP_WETH,
       BigInt("8500000000000"),
-      // Ensure calldata is a hex string; provide "0x" as a safe default and cast to the template hex type
       (contractCallQuote.transactionRequest?.data ?? "0x") as `0x${string}`,
     ],
   });
-
+  
   console.log(`Transaction sent: ${transactionHash}`);
-
+  
   console.log("Waiting for local confirmation...");
   const receipt = await currentPublicClient.waitForTransactionReceipt({
     hash: transactionHash,
@@ -341,9 +390,6 @@ const calldata = encodeFunctionData({
     });
   });
 }
-
-
-
 
 // Run main
 main().catch(console.error);

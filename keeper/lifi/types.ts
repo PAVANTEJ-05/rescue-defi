@@ -2,10 +2,9 @@
  * LI.FI Type Definitions for Rescue.ETH
  * 
  * ============================================================
- * DEMO-ONLY / FORK ENVIRONMENT
+ * PRODUCTION TYPES
  * ============================================================
- * These types are used with the LI.FI SDK in a forked/demo environment.
- * Real bridges cannot see transactions on local forks.
+ * These types define the interface with the LI.FI SDK.
  * 
  * The contractCallsQuote API is used to get routing + contract call
  * execution in a single transaction. This is INTENTIONAL - do not
@@ -59,6 +58,8 @@ export interface ContractCall {
   toContractCallData: string;
   /** Gas limit for the contract call */
   toContractGasLimit: string;
+  /** Address that needs token approval before the call (e.g., Aave Pool) */
+  toApprovalAddress?: string;
 }
 
 /**

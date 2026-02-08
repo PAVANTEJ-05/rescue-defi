@@ -84,16 +84,7 @@ export {
 } from './parser.js';
 
 // ============================================================
-// WRITER EXPORTS (DEMO ONLY)
+// WRITER EXPORTS — Moved to sandbox/ens-writer.ts
+// For demo/fork usage: import from '../sandbox/ens-writer.js'
 // ============================================================
-
-export {
-  // Writing (demo/fork only)
-  setRescueConfig,
-  verifyRescueConfig,
-  // Utilities
-  policyToTextRecords,
-  createEnsClients,
-} from './writer.js';
-
 

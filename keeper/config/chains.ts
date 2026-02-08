@@ -78,7 +78,6 @@ export const TRUSTED_LIFI_TARGETS: Record<number, Set<string>> = {
     '0x6a8b11bF29C0546991DEa5569bf3b3C8C4f38d54', // RelayerCelerIM
     '0xbD6C7B0d2f68c2b7805d88388319cfB6EcB50eA9', // Executor
     '0xBfA69CdE0191C59758E483A76A07939C53C177Ab', // GasZipFacet / Receiver
-    '0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae', // LiFiDiamond (lowercase for safety)
   ].map(addr => addr.toLowerCase())),
   
   [CHAIN_IDS.ARBITRUM]: new Set([
@@ -145,7 +144,7 @@ export const CHAINS: Record<number, ChainConfig> = {
     nativeToken: 'ETH',
     rpcUrl: 'https://mainnet.optimism.io',
     aavePool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-    aavePoolDataProvider: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+    aavePoolDataProvider: '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654',
     lifiRouter: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
     explorer: 'https://optimistic.etherscan.io',
   },
@@ -155,7 +154,7 @@ export const CHAINS: Record<number, ChainConfig> = {
     nativeToken: 'ETH',
     rpcUrl: 'https://arb1.arbitrum.io/rpc',
     aavePool: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-    aavePoolDataProvider: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
+    aavePoolDataProvider: '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654',
     lifiRouter: '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE',
     explorer: 'https://arbiscan.io',
   },

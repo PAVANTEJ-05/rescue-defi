@@ -2,7 +2,7 @@
  * LI.FI Quote Module for Rescue.ETH
  * 
  * ============================================================
- * CRITICAL: DO NOT MODIFY QUOTE LOGIC
+ * PRODUCTION MODULE — DO NOT MODIFY QUOTE LOGIC
  * ============================================================
  * This module uses contractCallsQuote, NOT the standard getRoutes/getQuote.
  * 
@@ -12,9 +12,9 @@
  * - This is how we call Aave's supply() on the destination chain
  * 
  * The flow:
- * 1. User has USDC on mainnet
- * 2. contractCallsQuote bridges USDC to Base
- * 3. On arrival, it calls AavePool.supply() with the USDC
+ * 1. RescueExecutor pulls tokens from user via transferFrom
+ * 2. RescueExecutor calls lifiRouter with callData from this quote
+ * 3. LiFi bridges tokens (if cross-chain) and calls Aave supply()
  * 4. User's Aave health factor is restored
  * 
  * Without contractCallsQuote, tokens would arrive but NOT be deposited
@@ -27,19 +27,8 @@ import { encodeFunctionData, parseAbi } from 'viem';
 import type { ContractCallsQuoteRequest, LiFiQuoteResponse } from './types.js';
 
 // ============================================================
-// AAVE CONFIGURATION
+// AAVE SUPPLY CALLDATA ENCODING
 // ============================================================
-
-/**
- * USDC address on Base (destination token)
- */
-export const USDC_BASE_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-
-/**
- * Aave V3 Pool address on Base
- * This is where supply() will be called
- */
-export const AAVE_POOL_ADDRESS = '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5';
 
 /**
  * Aave V3 Pool ABI (minimal subset for supply)
@@ -99,9 +88,16 @@ export function encodeAaveSupplyCalldata(
 
 /**
  * Parameters for creating a contract calls quote request
+ * 
+ * CRITICAL: fromAddress MUST be the executor contract address (not the user).
+ * After the contract pulls tokens from the user via transferFrom, the executor
+ * holds the tokens. LiFi needs to know the executor is the sender.
+ * 
+ * The aavePoolAddress MUST match the Aave pool for the destination chain.
+ * It is NOT hardcoded — callers must provide the chain-specific address from chainConfig.
  */
 export interface QuoteParams {
-  /** Address initiating the rescue */
+  /** Executor contract address — the entity that holds tokens and initiates the LiFi call */
   fromAddress: `0x${string}`;
   /** Source chain ID */
   fromChain: number;
@@ -115,6 +111,8 @@ export interface QuoteParams {
   toToken: `0x${string}`;
   /** User address to receive Aave collateral credit */
   beneficiary: `0x${string}`;
+  /** Chain-specific Aave V3 Pool address for the supply() call */
+  aavePoolAddress: `0x${string}`;
 }
 
 /**
@@ -155,9 +153,10 @@ export function buildContractCallsQuoteRequest(params: QuoteParams): ContractCal
       {
         fromAmount,
         fromTokenAddress: toToken, // Token on destination chain
-        toContractAddress: AAVE_POOL_ADDRESS,
+        toContractAddress: params.aavePoolAddress, // Chain-specific Aave pool (not hardcoded)
         toContractCallData: supplyCalldata,
         toContractGasLimit: '500000', // Conservative gas limit for Aave supply
+        toApprovalAddress: params.aavePoolAddress, // LiFi must approve Aave pool to spend tokens
       },
     ],
   };
@@ -190,7 +189,12 @@ export async function fetchContractCallsQuote(
 
 /**
  * Quote request parameters for keeper integration
- * (Aligned with keeper/index.ts expectations)
+ * (Aligned with keeper loop/tick.ts expectations)
+ * 
+ * CRITICAL:
+ * - executorAddress is used as LiFi's fromAddress (executor holds tokens after transferFrom)
+ * - beneficiary is the user receiving Aave supply credit
+ * - aavePoolAddress must be the correct pool for the target chain
  */
 export interface GetQuoteParams {
   fromChain: number;
@@ -198,8 +202,12 @@ export interface GetQuoteParams {
   fromToken: string;
   toToken: string;
   fromAmount: string;
-  fromAddress: string;
-  toAddress: string;
+  /** RescueExecutor contract address — becomes LiFi's fromAddress */
+  executorAddress: string;
+  /** User address receiving Aave collateral credit */
+  beneficiary: string;
+  /** Chain-specific Aave V3 Pool address */
+  aavePoolAddress: string;
 }
 
 /**
@@ -214,14 +222,16 @@ export interface GetQuoteParams {
 export async function getQuote(params: GetQuoteParams): Promise<LiFiQuoteResponse | null> {
   try {
     // Build the contract calls quote request
+    // CRITICAL: fromAddress = executor contract (holds tokens after transferFrom)
     const request = buildContractCallsQuoteRequest({
-      fromAddress: params.fromAddress as `0x${string}`,
+      fromAddress: params.executorAddress as `0x${string}`,
       fromChain: params.fromChain,
       fromToken: params.fromToken as `0x${string}`,
       fromAmount: params.fromAmount,
       toChain: params.toChain,
       toToken: params.toToken as `0x${string}`,
-      beneficiary: params.toAddress as `0x${string}`,
+      beneficiary: params.beneficiary as `0x${string}`,
+      aavePoolAddress: params.aavePoolAddress as `0x${string}`,
     });
 
     const quote = await fetchContractCallsQuote(request);

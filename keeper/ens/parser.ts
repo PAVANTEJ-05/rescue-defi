@@ -40,8 +40,8 @@
  * - enabled: false (MUST be explicitly enabled via ENS)
  * - minHF: 1.2
  * - targetHF: 1.5
- * - maxAmountUSD: 100000
- * - cooldownSeconds: 300
+ * - maxAmountUSD: 10000
+ * - cooldownSeconds: 3600
  * - allowedTokens: ['USDC', 'USDT', 'DAI']
  * - allowedChains: [1, 10, 8453]
  * 

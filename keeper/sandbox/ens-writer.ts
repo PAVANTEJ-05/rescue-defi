@@ -38,7 +38,7 @@ import {
 import { mainnet } from 'viem/chains';
 import { normalize } from 'viem/ens';
 import type { RescuePolicy } from '../config/types.js';
-import { ENS_KEYS } from './reader.js';
+import { ENS_KEYS } from '../ens/reader.js';
 
 // ============================================================
 // CONFIGURATION

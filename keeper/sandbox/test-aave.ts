@@ -2,8 +2,8 @@
  * Quick test to verify Aave data fetching works
  */
 import { JsonRpcProvider } from 'ethers';
-import { getUserAccountData } from './aave/monitor.js';
-import { getChainConfig } from './config/chains.js';
+import { getUserAccountData } from '../aave/monitor.js';
+import { getChainConfig } from '../config/chains.js';
 
 const RPC_URL = process.env['RPC_URL'] || 'https://virtual.rpc.tenderly.co/godofdeath/project/private/opm/05b55647-3026-437b-b35d-024f0725fae6';
 const CHAIN_ID = parseInt(process.env['CHAIN_ID'] || '10', 10);

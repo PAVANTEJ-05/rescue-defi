@@ -44,8 +44,8 @@ import {
 } from 'viem';
 import { base } from 'viem/chains';
 import { ChainId } from '@lifi/sdk';
-import { baseTestClient, TENDERLY_BASE_URL } from './config.js';
-import type { BridgeSimulationParams } from './types.js';
+import { baseTestClient, TENDERLY_BASE_URL } from './lifi-config.js';
+import type { BridgeSimulationParams } from '../lifi/types.js';
 
 // ============================================================
 // TOKEN CONFIGURATION

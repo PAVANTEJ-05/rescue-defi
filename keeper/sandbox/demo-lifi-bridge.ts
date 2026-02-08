@@ -60,14 +60,16 @@ import {
   mainnetTestClient,
   baseTestClient,
   TENDERLY_BASE_URL,
-} from './config.js';
+} from './lifi-config.js';
 import {
-  USDC_BASE_ADDRESS,
-  AAVE_POOL_ADDRESS,
   AAVE_POOL_ABI,
   encodeAaveSupplyCalldata,
-} from './quote.js';
-import { simulateUsdcBridgeArrival, fundWithNativeToken, formatTokenAmount } from './simulate.js';
+} from '../lifi/quote.js';
+
+// Demo-only constants (these are in chainConfig for production)
+const USDC_BASE_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const AAVE_POOL_ADDRESS = '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5';
+import { simulateUsdcBridgeArrival, fundWithNativeToken, formatTokenAmount } from './lifi-simulate.js';
 
 // ============================================================
 // TEST ACCOUNT CONFIGURATION

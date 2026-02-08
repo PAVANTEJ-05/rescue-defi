@@ -50,21 +50,21 @@ export function isStablecoin(symbol: string): boolean {
 /**
  * Default rescue policy
  * 
- * Values chosen for safety:
+ * Values chosen for MAINNET SAFETY:
  * - enabled: FALSE - MUST be explicitly enabled via ENS
  * - minHF 1.2: Trigger early (20% above liquidation)
  * - targetHF 1.5: Comfortable buffer after rescue
- * - maxAmountUSD 10: Small cap for demo safety
- * - cooldownSeconds 3600: 1 hour between rescues
+ * - maxAmountUSD 10000: Conservative cap (users can raise via ENS)
+ * - cooldownSeconds 3600: 1 hour between rescues (prevents rapid drain)
  * - allowedTokens: ONLY STABLECOINS (price = $1)
  * - allowedChains: Mainnet + major L2s
  */
 export const DEFAULT_POLICY: RescuePolicy = {
-  enabled: true, // CRITICAL: Must be explicitly enabled
+  enabled: false, // CRITICAL: Must be explicitly enabled via ENS rescue.enabled=true
   minHF: 1.2,
   targetHF: 1.5,
-  maxAmountUSD: 100000,
-  cooldownSeconds: 300, // 5 minutes
+  maxAmountUSD: 10_000,
+  cooldownSeconds: 3600, // 1 hour — prevents rapid repeated rescues
   allowedTokens: ['USDC', 'USDT', 'DAI'], // ONLY STABLECOINS
   allowedChains: [1, 10, 8453], // Mainnet, Optimism, Base
 };

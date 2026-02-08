@@ -30,6 +30,7 @@
  */
 
 import type { Provider, Signer } from 'ethers';
+import { Contract } from 'ethers';
 import type { MonitoredUser, RescueResult, RescuePolicy } from '../config/types.js';
 import { getChainConfig, getTokenAddress, isTrustedLiFiTarget, getTrustedLiFiTargets } from '../config/chains.js';
 import { isStablecoin } from '../config/defaults.js';
@@ -158,6 +159,8 @@ type SkipReason =
   | 'insufficient_cap_for_safety'
   | 'no_valid_stablecoin'
   | 'token_address_not_found'
+  | 'insufficient_approval'
+  | 'insufficient_token_balance'
   | 'quote_failed'
   | 'quote_target_invalid';
 
@@ -397,7 +400,68 @@ async function processUser(
   });
 
   // ============================================================
-  // STEP 12: Get LI.FI quote
+  // STEP 12: Pre-check user's token balance and approval
+  // CRITICAL: Avoids wasting gas on a tx that will revert due to
+  // insufficient balance or missing ERC20 approval on executor.
+  // ============================================================
+  try {
+    const ERC20_MINIMAL_ABI = [
+      'function allowance(address owner, address spender) view returns (uint256)',
+      'function balanceOf(address account) view returns (uint256)',
+    ] as const;
+    const token = new Contract(tokenAddress, ERC20_MINIMAL_ABI, provider);
+
+    const balanceOfFn = token.getFunction('balanceOf');
+    const allowanceFn = token.getFunction('allowance');
+
+    const [userBalance, allowance] = await Promise.all([
+      balanceOfFn(userAddress) as Promise<bigint>,
+      allowanceFn(userAddress, executorAddress) as Promise<bigint>,
+    ]);
+
+    if (userBalance < tokenAmount) {
+      logger.keeper.warn('User has insufficient token balance for rescue', {
+        user: userLog,
+        token: supplyToken.symbol,
+        required: tokenAmount.toString(),
+        balance: userBalance.toString(),
+      });
+      return { result: null, skipReason: 'insufficient_token_balance' };
+    }
+
+    if (allowance < tokenAmount) {
+      logger.keeper.warn('User has not approved executor for sufficient amount', {
+        user: userLog,
+        token: supplyToken.symbol,
+        required: tokenAmount.toString(),
+        allowance: allowance.toString(),
+        executor: executorAddress,
+        action: 'User must approve RescueExecutor to spend their tokens',
+      });
+      return { result: null, skipReason: 'insufficient_approval' };
+    }
+
+    logger.keeper.debug('Token balance and approval verified', {
+      user: userLog,
+      balance: userBalance.toString(),
+      allowance: allowance.toString(),
+      required: tokenAmount.toString(),
+    });
+  } catch (error) {
+    // Non-fatal: if check fails, let the tx attempt proceed
+    // The contract will revert with a clear error if approval is missing
+    logger.keeper.warn('Could not pre-check approval/balance, proceeding anyway', {
+      user: userLog,
+      error: error instanceof Error ? error.message : 'Unknown',
+    });
+  }
+
+  // ============================================================
+  // STEP 13: Get LI.FI quote
+  // CRITICAL: executorAddress is used as LiFi's fromAddress because
+  // the executor contract holds the tokens after pulling from user.
+  // beneficiary is the user receiving Aave supply credit.
+  // aavePoolAddress must be chain-specific from chainConfig.
   // ============================================================
   const quote = await getQuote({
     fromChain: chainConfig.chainId,
@@ -405,8 +469,9 @@ async function processUser(
     fromToken: tokenAddress,
     toToken: tokenAddress,
     fromAmount: tokenAmount.toString(),
-    fromAddress: userAddress,
-    toAddress: userAddress,
+    executorAddress: executorAddress,
+    beneficiary: userAddress,
+    aavePoolAddress: chainConfig.aavePool,
   });
 
   if (!quote) {
@@ -415,7 +480,7 @@ async function processUser(
   }
 
   // ============================================================
-  // STEP 13: Validate quote target is trusted LI.FI contract for this chain
+  // STEP 14: Validate quote target is trusted LI.FI contract for this chain
   // SECURITY CRITICAL: We use a chain-aware allowlist, not single router
   // ============================================================
   if (!isTrustedLiFiTarget(chainConfig.chainId, quote.to)) {
@@ -436,7 +501,7 @@ async function processUser(
   });
 
   // ============================================================
-  // STEP 14: Execute rescue
+  // STEP 15: Execute rescue
   // ============================================================
   logger.keeper.info('Executing rescue transaction', {
     user: userLog,
