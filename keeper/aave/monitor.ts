@@ -45,7 +45,7 @@ import type { Provider } from 'ethers';
 import { getAavePool } from './pool.js';
 import type { AaveAccountData } from '../config/types.js';
 import { AAVE_BASE_CURRENCY } from '../config/defaults.js';
-import { rayToDecimal, baseCurrencyToUsd, bpsToDecimal } from '../utils/units.js';
+import { rayToDecimal, wadToDecimal, baseCurrencyToUsd, bpsToDecimal } from '../utils/units.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -208,8 +208,8 @@ export async function getUserAccountData(
     }
 
     // CRITICAL: Parse reported HF using safe BigInt scaling
-    // The raw.healthFactor is a uint256 in RAY (1e27)
-    const reportedHF = rayToDecimal(raw.healthFactor, 6);
+    // Aave V3 getUserAccountData() returns healthFactor as uint256 in WAD (1e18)
+    const reportedHF = wadToDecimal(raw.healthFactor, 6);
 
     // CRITICAL: Compute derived HF from position components
     const derivedHF = computeDerivedHealthFactor(

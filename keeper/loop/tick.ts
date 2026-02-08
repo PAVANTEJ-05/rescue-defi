@@ -31,7 +31,7 @@
 
 import type { Provider, Signer } from 'ethers';
 import { Contract } from 'ethers';
-import type { MonitoredUser, RescueResult, RescuePolicy } from '../config/types.js';
+import type { MonitoredUser, RescueResult, RescuePolicy, AaveAccountData } from '../config/types.js';
 import { getChainConfig, getTokenAddress, isTrustedLiFiTarget, getTrustedLiFiTargets } from '../config/chains.js';
 import { isStablecoin } from '../config/defaults.js';
 import { getUserAccountData, needsRescue, getRiskLevel } from '../aave/monitor.js';
@@ -40,6 +40,7 @@ import { readEnsConfig } from '../ens/reader.js';
 import { parseEnsConfig, isChainAllowed, validatePolicy } from '../ens/parser.js';
 import { getQuote } from '../lifi/quote.js';
 import { executeRescue, checkCooldownInfo, type ExecuteParams } from '../lifi/execute.js';
+import { getCrossChainQuote, type CrossChainConfig } from '../lifi/crosschain-rescue.js';
 import { logger } from '../utils/logger.js';
 import { usdToTokenUnits } from '../utils/units.js';
 
@@ -73,6 +74,8 @@ export interface TickContext {
   demoMode: boolean;
   /** Users to monitor */
   monitoredUsers: MonitoredUser[];
+  /** Cross-chain rescue configuration (from execute.ts integration) */
+  crossChainConfig?: CrossChainConfig;
 }
 
 /**
@@ -325,6 +328,39 @@ async function processUser(
   });
 
   // ============================================================
+  // STEP 7b: HF BREACH LIFECYCLE LOG
+  // Timestamped, structured log for production debugging.
+  // ============================================================
+  logger.rescue.info('HF BREACH DETECTED', {
+    timestamp: new Date().toISOString(),
+    user: userLog,
+    ens: ensName,
+    healthFactor: accountData.healthFactor.toFixed(4),
+    threshold: policy.minHF,
+    collateralUSD: accountData.totalCollateralUSD.toFixed(2),
+    debtUSD: accountData.totalDebtUSD.toFixed(2),
+    riskLevel: getRiskLevel(accountData.healthFactor),
+  });
+
+  // ============================================================
+  // STEP 7c: CROSS-CHAIN RESCUE PATH (execute.ts integration)
+  // If cross-chain rescue is configured, use the execution path
+  // derived from execute.ts (source of truth). This bridges tokens
+  // from the source chain to the destination chain via LI.FI and
+  // executes Aave supply() on arrival.
+  // ============================================================
+  if (ctx.crossChainConfig) {
+    logger.rescue.info('Cross-chain rescue path selected (execute.ts)', {
+      timestamp: new Date().toISOString(),
+      sourceChain: chainConfig.chainId,
+      destChain: ctx.crossChainConfig.destChainId,
+      token: ctx.crossChainConfig.sourceTokenAddress.slice(0, 10) + '...',
+      amount: ctx.crossChainConfig.amount.toString(),
+    });
+    return await processCrossChainRescue(user, ctx, accountData, policy);
+  }
+
+  // ============================================================
   // STEP 8: Compute required supply with safety checks
   // ============================================================
   const supplyCalc = computeRequiredSupply(accountData, policy);
@@ -500,6 +536,17 @@ async function processUser(
     chainId: chainConfig.chainId,
   });
 
+  logger.rescue.info('Same-chain rescue route resolved', {
+    timestamp: new Date().toISOString(),
+    user: userLog,
+    sourceChain: chainConfig.chainId,
+    destChain: chainConfig.chainId,
+    token: supplyToken.symbol,
+    amount: tokenAmount.toString(),
+    amountUSD: supplyCalc.amountUSD.toFixed(2),
+    lifiTarget: quote.to,
+  });
+
   // ============================================================
   // STEP 15: Execute rescue
   // ============================================================
@@ -519,6 +566,224 @@ async function processUser(
   };
 
   const result = await executeRescue(executorAddress, executeParams, signer);
+
+  // ============================================================
+  // STEP 16: RESCUE LIFECYCLE — FINAL RESULT LOG
+  // ============================================================
+  if (result.success) {
+    logger.rescue.info('RESCUE SUCCESSFUL', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      txHash: result.txHash,
+      chain: chainConfig.chainId,
+      token: supplyToken.symbol,
+      amountUSD: supplyCalc.amountUSD.toFixed(2),
+      expectedHF: supplyCalc.expectedHF.toFixed(4),
+    });
+  } else {
+    logger.rescue.error('RESCUE FAILED', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      error: result.error,
+      chain: chainConfig.chainId,
+      token: supplyToken.symbol,
+      amountUSD: supplyCalc.amountUSD.toFixed(2),
+    });
+  }
+
+  return { result };
+}
+
+// ============================================================
+// CROSS-CHAIN RESCUE PROCESSING (execute.ts integration)
+// ============================================================
+
+/**
+ * Process a cross-chain rescue for a user
+ *
+ * This function implements the keeper's integration with execute.ts.
+ * When HF breach is detected on the monitored chain, this function:
+ *
+ * 1. Pre-checks user's source token balance and approval
+ * 2. Builds a cross-chain LI.FI contractCallsQuote (execute.ts Phase 2-3)
+ * 3. Validates the quote target against trusted LI.FI contracts
+ * 4. Executes via RescueExecutor.executeRescue() (existing lifi/execute.ts)
+ *
+ * The RescueExecutor pulls tokens from the user on the source chain,
+ * approves LI.FI, and forwards the calldata. LI.FI handles bridging
+ * to the destination chain and calling Aave supply().
+ *
+ * HF detection stays in tick.ts — this is purely execution.
+ */
+async function processCrossChainRescue(
+  user: MonitoredUser,
+  ctx: TickContext,
+  accountData: AaveAccountData,
+  policy: RescuePolicy
+): Promise<{ result: RescueResult | null; skipReason?: SkipReason }> {
+  const { address: userAddress } = user;
+  const { chainConfig, provider, signer, executorAddress } = ctx;
+  const ccConfig = ctx.crossChainConfig!;
+  const userLog = userAddress.slice(0, 10) + '...';
+
+  logger.rescue.info('execute.ts cross-chain rescue triggered', {
+    timestamp: new Date().toISOString(),
+    user: userLog,
+    healthFactor: accountData.healthFactor.toFixed(4),
+    sourceChain: chainConfig.chainId,
+    destChain: ccConfig.destChainId,
+    sourceToken: ccConfig.sourceTokenAddress.slice(0, 10) + '...',
+    destToken: ccConfig.destTokenAddress.slice(0, 10) + '...',
+    amount: ccConfig.amount.toString(),
+    destAavePool: ccConfig.destAavePool.slice(0, 10) + '...',
+  });
+
+  // ─── Pre-check user's source token balance and approval ─────────
+  // Mirrors execute.ts Phase 1 (balance + allowance checks)
+  try {
+    const ERC20_MINIMAL_ABI = [
+      'function allowance(address owner, address spender) view returns (uint256)',
+      'function balanceOf(address account) view returns (uint256)',
+    ] as const;
+    const token = new Contract(ccConfig.sourceTokenAddress, ERC20_MINIMAL_ABI, provider);
+    const balanceOfFn = token.getFunction('balanceOf');
+    const allowanceFn = token.getFunction('allowance');
+
+    const [userBalance, allowance] = await Promise.all([
+      balanceOfFn(userAddress) as Promise<bigint>,
+      allowanceFn(userAddress, executorAddress) as Promise<bigint>,
+    ]);
+
+    logger.rescue.info('Source token status verified', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      token: ccConfig.sourceTokenAddress.slice(0, 10) + '...',
+      balance: userBalance.toString(),
+      allowance: allowance.toString(),
+      required: ccConfig.amount.toString(),
+    });
+
+    if (userBalance < ccConfig.amount) {
+      logger.rescue.warn('Insufficient source token balance for cross-chain rescue', {
+        timestamp: new Date().toISOString(),
+        user: userLog,
+        balance: userBalance.toString(),
+        required: ccConfig.amount.toString(),
+      });
+      return { result: null, skipReason: 'insufficient_token_balance' };
+    }
+
+    if (allowance < ccConfig.amount) {
+      logger.rescue.warn('Insufficient approval for cross-chain rescue', {
+        timestamp: new Date().toISOString(),
+        user: userLog,
+        allowance: allowance.toString(),
+        required: ccConfig.amount.toString(),
+        executor: executorAddress,
+        action: 'User must approve RescueExecutor to spend source tokens',
+      });
+      return { result: null, skipReason: 'insufficient_approval' };
+    }
+  } catch (error) {
+    // Non-fatal: if pre-check fails, let the contract revert with a clear error
+    logger.rescue.warn('Could not pre-check cross-chain balance/approval, proceeding', {
+      error: error instanceof Error ? error.message : 'Unknown',
+    });
+  }
+
+  // ─── Build cross-chain LI.FI quote (execute.ts Phase 2-3) ──────
+  const keeperAddress = await signer.getAddress();
+
+  const quote = await getCrossChainQuote({
+    userAddress,
+    sourceChainId: chainConfig.chainId,
+    destChainId: ccConfig.destChainId,
+    sourceToken: ccConfig.sourceTokenAddress,
+    destToken: ccConfig.destTokenAddress,
+    amount: ccConfig.amount,
+    fromAddress: executorAddress,  // executor holds tokens after transferFrom
+    fallbackAddress: keeperAddress,
+    destAavePool: ccConfig.destAavePool,
+  });
+
+  if (!quote) {
+    logger.rescue.error('Cross-chain LI.FI quote failed — rescue aborted', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      route: `Chain ${chainConfig.chainId} → Chain ${ccConfig.destChainId}`,
+    });
+    return { result: null, skipReason: 'quote_failed' };
+  }
+
+  // ─── Validate quote target against trusted LI.FI allowlist ──────
+  if (!isTrustedLiFiTarget(chainConfig.chainId, quote.to)) {
+    const trustedTargets = getTrustedLiFiTargets(chainConfig.chainId);
+    logger.rescue.error('Cross-chain quote target NOT TRUSTED — SECURITY ABORT', {
+      timestamp: new Date().toISOString(),
+      chainId: chainConfig.chainId,
+      receivedTarget: quote.to,
+      trustedTargets,
+    });
+    return { result: null, skipReason: 'quote_target_invalid' };
+  }
+
+  logger.rescue.info('Cross-chain quote target validated', {
+    timestamp: new Date().toISOString(),
+    target: quote.to,
+    chainId: chainConfig.chainId,
+  });
+
+  // ─── Execute rescue via RescueExecutor (existing lifi/execute.ts) ─
+  // The RescueExecutor contract:
+  // 1. Calls transferFrom(user → executor) for source token
+  // 2. Approves immutable lifiRouter for exact amount
+  // 3. Forwards LI.FI calldata to lifiRouter (handles bridge + dest call)
+  // 4. Clears approval, verifies zero residual balance
+
+  logger.rescue.info('Submitting cross-chain rescue via RescueExecutor', {
+    timestamp: new Date().toISOString(),
+    user: userLog,
+    executor: executorAddress.slice(0, 10) + '...',
+    lifiTarget: quote.to,
+    sourceChain: chainConfig.chainId,
+    destChain: ccConfig.destChainId,
+    amount: ccConfig.amount.toString(),
+  });
+
+  const executeParams: ExecuteParams = {
+    userAddress,
+    tokenIn: ccConfig.sourceTokenAddress,
+    amountIn: ccConfig.amount,
+    quote,
+    amountUSD: 0, // Cross-chain uses fixed token amount; USD N/A
+  };
+
+  const result = await executeRescue(executorAddress, executeParams, signer);
+
+  // ─── Rescue lifecycle final result log ──────────────────────────
+  if (result.success) {
+    logger.rescue.info('CROSS-CHAIN RESCUE SUCCESSFUL', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      txHash: result.txHash,
+      sourceChain: chainConfig.chainId,
+      destChain: ccConfig.destChainId,
+      sourceToken: ccConfig.sourceTokenAddress.slice(0, 10) + '...',
+      amount: ccConfig.amount.toString(),
+      destAavePool: ccConfig.destAavePool.slice(0, 10) + '...',
+    });
+  } else {
+    logger.rescue.error('CROSS-CHAIN RESCUE FAILED', {
+      timestamp: new Date().toISOString(),
+      user: userLog,
+      error: result.error,
+      sourceChain: chainConfig.chainId,
+      destChain: ccConfig.destChainId,
+      sourceToken: ccConfig.sourceTokenAddress.slice(0, 10) + '...',
+      amount: ccConfig.amount.toString(),
+    });
+  }
+
   return { result };
 }
 

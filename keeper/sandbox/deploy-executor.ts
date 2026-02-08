@@ -129,7 +129,7 @@ const aaveUserDataAbi = [
   },
 ];
 
-const AAVE_USER = "0xb789576d412aeec021fe01ded9541b272f472aab"  // who borrowed loan form aave
+const AAVE_USER = "0xcaf4bfb53e07fd02e7e46894564d7caac3d9b35b"  // who borrowed loan form aave
 
 const data = await publicOpClient.readContract({
   abi: aaveUserDataAbi,

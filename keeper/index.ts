@@ -39,6 +39,9 @@ import { getChainConfig } from './config/chains.js';
 // Loop
 import { runForever, type TickContext, type RunnerConfig } from './loop/index.js';
 
+// Cross-chain rescue (execute.ts integration)
+import { loadCrossChainConfig } from './lifi/crosschain-rescue.js';
+
 // Utils
 import { logger } from './utils/logger.js';
 
@@ -183,7 +186,7 @@ function loadMonitoredUsers(): MonitoredUser[] {
   logger.keeper.warn('For production, set MONITORED_USERS as a JSON array');
   
   const users: MonitoredUser[] = [
-    { address: '0xb87e30d0351dc5770541b3233e13c8cf810b287b', ensName: '' },
+    { address: '0xcaf4bfb53e07fd02e7e46894564d7caac3d9b35b', ensName: 'nick.eth' },
   ];
 
   return users;
@@ -303,6 +306,20 @@ async function bootstrap(): Promise<void> {
     });
   }
 
+  // Load cross-chain rescue configuration (execute.ts integration)
+  const crossChainConfig = loadCrossChainConfig();
+  if (crossChainConfig) {
+    logger.keeper.info('Cross-chain rescue ENABLED (execute.ts integration)', {
+      destChainId: crossChainConfig.destChainId,
+      sourceToken: crossChainConfig.sourceTokenAddress.slice(0, 10) + '...',
+      destToken: crossChainConfig.destTokenAddress.slice(0, 10) + '...',
+      amount: crossChainConfig.amount.toString(),
+      destAavePool: crossChainConfig.destAavePool.slice(0, 10) + '...',
+    });
+  } else {
+    logger.keeper.info('Cross-chain rescue disabled (same-chain mode)');
+  }
+
   // Build tick context
   const tickContext: TickContext = {
     chainConfig,
@@ -312,6 +329,7 @@ async function bootstrap(): Promise<void> {
     executorAddress: keeperConfig.executorAddress,
     demoMode: keeperConfig.demoMode,
     monitoredUsers,
+    ...(crossChainConfig ? { crossChainConfig } : {}),
   };
 
   // Build runner config

@@ -7,7 +7,7 @@ import { getChainConfig } from '../config/chains.js';
 
 const RPC_URL = process.env['RPC_URL'] || 'https://virtual.rpc.tenderly.co/godofdeath/project/private/opm/05b55647-3026-437b-b35d-024f0725fae6';
 const CHAIN_ID = parseInt(process.env['CHAIN_ID'] || '10', 10);
-const USER = '0xb87e30d0351dc5770541b3233e13c8cf810b287b';
+const USER = '0xcaf4bfb53e07fd02e7e46894564d7caac3d9b35b';
 
 async function test() {
   console.log('='.repeat(60));

@@ -19,3 +19,5 @@ onchain/hooks/broadcast/
 .DS_Store
 .idea/
 .vscode/
+deploy.ts
+execute.ts

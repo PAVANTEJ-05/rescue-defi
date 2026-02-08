@@ -73,3 +73,17 @@ export {
 } from './execute.js';
 
 export type { CooldownInfo } from './execute.js';
+
+// ============================================================
+// CROSS-CHAIN RESCUE EXPORTS (from execute.ts integration)
+// ============================================================
+
+export {
+  getCrossChainQuote,
+  loadCrossChainConfig,
+} from './crosschain-rescue.js';
+
+export type {
+  CrossChainConfig,
+  CrossChainQuoteParams,
+} from './crosschain-rescue.js';

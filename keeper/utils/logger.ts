@@ -89,4 +89,5 @@ export const logger = {
   ens: createLogger('ENS'),
   lifi: createLogger('LiFi'),
   executor: createLogger('Executor'),
+  rescue: createLogger('Rescue'),
 };

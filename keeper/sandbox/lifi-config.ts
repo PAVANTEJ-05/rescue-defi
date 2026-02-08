@@ -62,7 +62,7 @@ const LOCAL_FORK_URL = 'https://virtual.rpc.tenderly.co/godofdeath/project/priva
  * 
  * TODO: Move to environment variable
  */
-const TENDERLY_BASE_URL = 'https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34';
+const TENDERLY_BASE_URL = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/base/da9775f9-38c5-45f4-a930-d88b02729bfd';
 
 // ============================================================
 // SUPPORTED CHAINS

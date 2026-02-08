@@ -44,7 +44,8 @@ import { normalize } from 'viem/ens';
 
 /**
  * Fork RPC URL
- * Must be a mainnet fork with impersonation support (Anvil)
+ * Tenderly Virtual Testnet (mainnet fork with ENS)
+ * Tenderly allows sending transactions from any address without impersonation.
  */
 const FORK_RPC = 'https://virtual.rpc.tenderly.co/godofdeath/project/private/etherum-fork1/e0771959-4d8b-4382-9b62-c26eb29cd765';
 
@@ -92,9 +93,10 @@ const testClient = createTestClient({
  * - rescue.cooldown: Seconds between rescues
  */
 const rescueConfigRecords = [
+  { key: 'rescue.enabled', value: 'true' },
   { key: 'rescue.minHF', value: '1.2' },
   { key: 'rescue.targetHF', value: '1.5' },
-  { key: 'rescue.maxAmount', value: '1.2' },
+  { key: 'rescue.maxAmount', value: '10000' },
   { key: 'rescue.cooldown', value: '500' },
 ];
 
@@ -128,10 +130,9 @@ async function main() {
     throw new Error(`ENS name ${DEMO_ENS_NAME} did not resolve to an address`);
   }
 
-  // Step 2: Impersonate the owner
-  console.log(`\nImpersonating ${ensAddress}...`);
-  await testClient.impersonateAccount({ address: ensAddress });
-  console.log('  Impersonation successful (fork only!)');
+  // Step 2: On Tenderly, any address can send transactions natively (no impersonation needed)
+  // On Anvil, you'd call testClient.impersonateAccount({ address: ensAddress })
+  console.log(`\nUsing ${ensAddress} as sender (Tenderly allows any-address txns)...`);
 
   // Step 3: Create wallet client for writing
   const wallet = createWalletClient({

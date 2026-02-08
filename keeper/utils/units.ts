@@ -9,7 +9,15 @@
  */
 
 /**
- * Aave uses RAY (1e27) for health factor and rate calculations
+ * Aave uses WAD (1e18) for health factor in getUserAccountData
+ * NOTE: Despite Aave docs sometimes mentioning RAY, getUserAccountData
+ * actually returns health factor in WAD (1e18) format.
+ */
+export const WAD_DECIMALS = 18n;
+export const WAD = 10n ** WAD_DECIMALS;
+
+/**
+ * Aave uses RAY (1e27) for rate calculations (not health factor)
  */
 export const RAY_DECIMALS = 27n;
 export const RAY = 10n ** RAY_DECIMALS;
@@ -37,6 +45,34 @@ export const COMMON_DECIMALS: Record<string, number> = {
   WETH: 18,
   ETH: 18,
 };
+
+/**
+ * Convert WAD value (1e18) to decimal number
+ * 
+ * Aave V3 getUserAccountData() returns health factor as uint256 in WAD (1e18).
+ * 
+ * Example:
+ *   WAD = 1e18
+ *   healthFactor = 2.6e18 (represents HF of 2.6)
+ *   wadToDecimal(2.6e18) => 2.6
+ * 
+ * @param wad - BigInt value in WAD (1e18) units
+ * @param precision - Number of decimal places in result (default: 6)
+ * @returns Decimal number representation
+ */
+export function wadToDecimal(wad: bigint, precision: number = 6): number {
+  if (wad === 0n) return 0;
+  
+  // For very large values (effectively infinity — no debt scenario)
+  const MAX_REASONABLE_HF_WAD = 10n ** 27n; // 1e9 as a WAD value
+  if (wad >= MAX_REASONABLE_HF_WAD) {
+    return Infinity;
+  }
+
+  const precisionMultiplier = BigInt(10 ** precision);
+  const scaled = (wad * precisionMultiplier) / WAD;
+  return Number(scaled) / (10 ** precision);
+}
 
 /**
  * Convert RAY value (1e27) to decimal number with specified precision
