@@ -93,7 +93,7 @@ function getWalletClientForChain(chainId: number) {
       : http("http://127.0.0.1:8545");
 
   return createWalletClient({
-    account: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7", // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING)
+    account: ETH_WHALE, // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING)
     chain: (chain ?? mainnet) as Chain,
     transport,
   });
@@ -186,64 +186,64 @@ createConfig({
         // getPublicClient: async (chainId) => getPublicClientForChain(chainId),
     }),
   ],
-  preloadChains: false,
+  preloadChains: true,
 });
 
 // Main Execution Function
 async function main() {
   // Impersonate the whale account on the mainnet fork (optional)
-  await testClient.impersonateAccount({
-    address: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7",
-  });
+  // await testClient.impersonateAccount({
+  //   address: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  // });
 
 
   // ============== GETTING ROUTES FOR NORMAL BRIDGE SWAP ===========
-  //   console.log("Getting routes...");
-  //   const result = await getRoutes({
-  //     fromChainId: ChainId.ETH,
-  //     toChainId: ChainId.BAS,
-  //     fromTokenAddress: "0x0000000000000000000000000000000000000000", // ETH on ETH
-  //     toTokenAddress: USDC_BASE_ADDRESS, // USDC on Base
-  //     fromAmount: "30000000000000000",
-  //     fromAddress: ETH_WHALE.address, // Use the whale address
-  //   });
+    console.log("Getting routes...");
+    const result = await getRoutes({
+      fromChainId: ChainId.OPT,
+      toChainId: ChainId.ETH,
+      fromTokenAddress: "0x0000000000000000000000000000000000000000", // ETH on ETH
+      toTokenAddress: "0x4200000000000000000000000000000000000006", // weth on Base
+      fromAmount: "30000000000000000",
+      fromAddress: ETH_WHALE.address, // Use the whale address
+    });
 
-  //   // console.log(config.get())
+    // console.log(config.get())
 
-  //   if (!result.routes.length) {
-  //     console.error("No routes found");
-  //     return;
-  //   }
+    if (!result.routes.length) {
+      console.error("No routes found");
+      return;
+    }
 
-  //   const route = result.routes[0];
-  //   if (!route) return;
+    const route = result.routes[0];
+    if (!route) return;
 
-  //   console.log("Route found:", route.id);
-  // //   await executeRouteSteps(route);
+    console.log("Route found:", route.id);
+    await executeRouteSteps(route);
 
   // ================= CONTRACT CALL QUOTE AND EXECUTION OF TXN =================
   // Contract call quote transacrtion request
-  const contractCallQuote = await getContractCallsQuote(
-    contractCallsQuoteRequest,
-  );
-  console.log(contractCallQuote);
-  const fromChainId = contractCallQuote.action.fromChainId;
-  const currentClient = getWalletClientForChain(fromChainId);
-  const currentPublicClient = getPublicClientForChain(fromChainId);
+  // const contractCallQuote = await getContractCallsQuote(
+  //   contractCallsQuoteRequest,
+  // );
+  // console.log(contractCallQuote);
+  // const fromChainId = contractCallQuote.action.fromChainId;
+  // const currentClient = getWalletClientForChain(fromChainId);
+  // const currentPublicClient = getPublicClientForChain(fromChainId);
 
-  // Remove gas fields to let viem/local node estimate them for the fork
-  const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } =
-    contractCallQuote.transactionRequest as any;
-  console.log("txn will be sent after this , txRequest:-----", txRequest);
+  // // Remove gas fields to let viem/local node estimate them for the fork
+  // const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } =
+  //   contractCallQuote.transactionRequest as any;
+  // console.log("txn will be sent after this , txRequest:-----", txRequest);
 
-  const transactionHash = await currentClient.sendTransaction(txRequest);
-  console.log(`Transaction sent: ${transactionHash}`);
+  // const transactionHash = await currentClient.sendTransaction(txRequest);
+  // console.log(`Transaction sent: ${transactionHash}`);
 
-  console.log("Waiting for local confirmation...");
-  const receipt = await currentPublicClient.waitForTransactionReceipt({
-    hash: transactionHash,
-  });
-  console.log(`Transaction mined in block ${receipt.blockNumber}`);
+  // console.log("Waiting for local confirmation...");
+  // const receipt = await currentPublicClient.waitForTransactionReceipt({
+  //   hash: transactionHash,
+  // });
+  // console.log(`Transaction mined in block ${receipt.blockNumber}`);
 
 // TO-DO: SIMULATE THE CONTRACT CALL ON BASE MAINNET ON TENDERLY URL USING CHEATCODES (IF POSSIBLE ALSO MANIULATE THE HF OF AAVE CONTRACT ON TARGET CHAIN)
 
@@ -254,7 +254,7 @@ async function main() {
     ETH_WHALE.address,
     tokensByChain,
   );
-console.log(balance)
+console.log("\n","=".repeat(10),"Balance of",ETH_WHALE.address,"=".repeat(10))
   // Display balances per chain/token (handles bigint amounts)
   function formatAmount(amount: bigint, decimals: number) {
     const sign = amount < 0n ? "-" : "";
@@ -286,7 +286,7 @@ const calldata = encodeFunctionData({
 });
 
 const contractCallsQuoteRequest = {
-  fromAddress: "0xC3F2F6c9A765c367c33ED11827BB676250481ca7", // replace by contract address of executor contract which keeper calls
+  fromAddress: "0x90F79bf6EB2c4f870365E785982E1f101E93b906", // replace with contract address of executor_contract which keeper calls
   fromChain: 1,
   fromToken: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
   toAmount: "8500000",
@@ -298,7 +298,7 @@ const contractCallsQuoteRequest = {
       fromTokenAddress: USDC_BASE_ADDRESS,
       toContractAddress: AAVE_POOL_ADDRESS,
       toContractCallData: calldata,
-      toContractGasLimit: "500000",
+      toContractGasLimit: "500000",AAVE_POOL_ABI
     },
   ],
 };

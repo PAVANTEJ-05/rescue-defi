@@ -41,9 +41,11 @@ const ETH_WHALE = privateKeyToAccount(
 const chains = [arbitrum, mainnet, optimism, polygon, base];
 // const USDC_BASE_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
-const AAVE_USER = "0xb789576d412aeec021fe01ded9541b272f472aab"
+const AAVE_USER = "0xb789576d412aeec021fe01ded9541b272f472aab";
 
+const RPC_OPT = "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db"
 const AAVE_POOL_ADDRESS = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
+const AAVE_POOL_ADDRESS_BASE = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5";
 const tokensByChain = {
   1: [
     {
@@ -65,7 +67,7 @@ const tokensByChain = {
       priceUSD: "0.9999",
     },
     {
-      chainId: 8453,
+      chainId: 10,
       address: "0x0000000000000000000000000000000000000000",
       symbol: "ETH",
       name: "op",
@@ -75,7 +77,6 @@ const tokensByChain = {
   ],
 };
 
-
 // 2. Helper factories for per-chain wallet/public clients
 // Keep the same account (ETH_WHALE) across chains for tests/forks.
 function getWalletClientForChain(chainId: number) {
@@ -83,7 +84,7 @@ function getWalletClientForChain(chainId: number) {
   const transport =
     chainId === ChainId.OPT
       ? http(
-          "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+          RPC_OPT,
         )
       : http();
 
@@ -98,9 +99,9 @@ function getPublicClientForChain(chainId: number) {
   const transport =
     chainId === ChainId.OPT
       ? http(
-          "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+          RPC_OPT,
         )
-      : http("http://127.0.0.1:8545");
+      : http();
 
   return createPublicClient({
     chain: chainId === ChainId.OPT ? optimism : mainnet,
@@ -113,7 +114,7 @@ const baseTestClient = createTestClient({
   chain: base,
   mode: "anvil",
   transport: http(
-    "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
+    "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
   ),
 })
   .extend(publicActions)
@@ -123,7 +124,7 @@ const baseTestClient = createTestClient({
 const mainnetWalletClient = getWalletClientForChain(ChainId.OPT);
 const mainnetPublicClient = getPublicClientForChain(ChainId.OPT);
 
-const EXECUTOR_CONTRACT ="0x825794255ae3960f62de3fc3e0e94ee2a4887f73"
+const EXECUTOR_CONTRACT = "0x825794255ae3960f62de3fc3e0e94ee2a4887f73"; // original
 const WETH_BASE = "0x4200000000000000000000000000000000000006";
 const WETH_ABI = parseAbi([
   "function deposit() payable",
@@ -168,13 +169,13 @@ const OP_WETH = "0x4200000000000000000000000000000000000006";
 createConfig({
   integrator: "test-Lifi",
   rpcUrls: {
-    [ChainId.ETH]: ["http://127.0.0.1:8545"],
+    [ChainId.ETH]: [],
     [ChainId.BAS]: [
       "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
     ],
-        [ChainId.OPT]: [
-      "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
-    ]
+    [ChainId.OPT]: [
+      RPC_OPT,
+    ],
   },
   providers: [
     EVM({
@@ -225,103 +226,83 @@ const RESCUE_EXECUTOR_ABI = parseAbi([
   // =========================
   // Receive ETH
   // =========================
-  "receive() external payable"
+  "receive() external payable",
 ]);
-
 
 // Main Execution Function
 async function main() {
-  const keeperWallet = createWalletClient({
-    account: ETH_WHALE, // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING) ---(executor contract)
-    chain: optimism,
-    transport: http(
-      "https://virtual.rpc.tenderly.co/phoenix05/project/private/optimism-fork2/2fd2c520-f1da-473f-b414-4e1f53c953db",
-    ),
-  });
+//   const keeperWallet = createWalletClient({
+//     account: ETH_WHALE, // CHANGE THIS TO ETH_WHALE (ONCE DONE TESTING) ---(executor contract)
+//     chain: optimism,
+//     transport: http(
+//       RPC_OPT,
+//     ),
+//   });
 
   // ================= CONTRACT CALL QUOTE AND EXECUTION OF TXN =================
   // Build calldata for the Aave supply call
-const calldata = encodeFunctionData({
-  abi: AAVE_POOL_ABI,
-  functionName: "supply",
-  args: [
-    OP_WETH,
-    BigInt(8500000000000),
-    "0xb87e30d0351dc5770541b3233e13c8cf810b287b",
-    0,
-  ], // refer abi code of aave to pass what arguments
-});
+  const calldata = encodeFunctionData({
+    abi: AAVE_POOL_ABI,
+    functionName: "supply",
+    args: [
+      OP_WETH,
+      BigInt(8500000000000000000),
+      "0xb789576d412aeec021fe01ded9541b272f472aab", // user account who took loan on aave(onBehalf of)
+      0,
+    ], // refer abi code of aave to pass what arguments
+  });
 
   // Contract call quote transaction request (must be defined before use)
   const contractCallsQuoteRequest = {
-  fromAddress: EXECUTOR_CONTRACT, // replace with contract address of executor_contract which keeper calls
-  fromChain: 10,
-  fromToken: OP_WETH,
-  toAmount: "8500000000000", // Must match fromAmount for same-chain contract calls
-  toChain: 10,
-  toToken: OP_WETH,
-  contractCalls: [
-    {
-      fromAmount: "8500000000000",
-      fromTokenAddress: OP_WETH,
-      toContractAddress: AAVE_POOL_ADDRESS,
-      toContractCallData: calldata,
-      toContractGasLimit: "500000000",
-    //   toApprovalAddress: AAVE_POOL_ADDRESS,
-    },
-  ],
-};
-    console.log("Getting routes...");
-    const result = await getRoutes({
-      fromChainId: ChainId.OPT,
-      toChainId: ChainId.ETH,
-      fromTokenAddress: "0x0000000000000000000000000000000000000000", // ETH on ETH
-      toTokenAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // usdc on Base
-      fromAmount: "30000000000000000",
-      fromAddress: ETH_WHALE.address, // Use the whale address
-    });
-
-    // console.log(config.get())
-
-    if (!result.routes.length) {
-      console.error("No routes found");
-      return;
-    }
-
-    const route = result.routes[0];
-    if (!route) return;
-
-    console.log("Route found:", route.id);
-    await executeRouteSteps(route);
+    fromAddress: EXECUTOR_CONTRACT, // replace with contract address of executor_contract which keeper calls
+    fromChain: 10,
+    fromToken: OP_WETH,
+    toAmount: "8500000000000000000", // Must match fromAmount for same-chain contract calls
+    toChain: 10,
+    toToken: OP_WETH,
+    contractCalls: [
+      {
+        fromAmount: "8500000000000000000",
+        fromTokenAddress: OP_WETH,
+        toContractAddress: AAVE_POOL_ADDRESS,
+        toContractCallData: calldata,
+        toContractGasLimit: "500000000",
+        toApprovalAddress: AAVE_POOL_ADDRESS,
+      },
+    ],
+  };
 
   // Contract call quote transaction request
-//   const contractCallQuote = await getContractCallsQuote(
-//     contractCallsQuoteRequest,
-//   );
-//   console.log(contractCallQuote);
-//   const fromChainId = contractCallQuote.action.fromChainId;
-//   const currentClient = getWalletClientForChain(fromChainId);
-//   const currentPublicClient = getPublicClientForChain(fromChainId);
-//   // Remove gas fields to let viem/local node estimate them for the fork
+  const contractCallQuote = await getContractCallsQuote(
+    contractCallsQuoteRequest,
+  );
+  console.log(contractCallQuote);
+  const fromChainId = contractCallQuote.action.fromChainId;
+  const currentClient = getWalletClientForChain(fromChainId);
+  const currentPublicClient = getPublicClientForChain(fromChainId);
+  // Remove gas fields to let viem/local node estimate them for the fork
 //   const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } =
 //     contractCallQuote.transactionRequest as any;
 //   console.log("txn will be sent after this , txRequest:-----", txRequest);
 
-// // Calldata for the contract call for aave
-// //   const transactionHash = await currentClient.sendTransaction(txRequest);
+  // ─────────────────────────────────────────────────────────────────────────
+  // OPTION A — Send the LiFi calldata DIRECTLY to the LiFi Diamond router
+  //            (bypasses RescueExecutor; good for verifying the LiFi quote
+  //             actually works on a FRESH fork with up-to-date facets)
+  // ─────────────────────────────────────────────────────────────────────────
+  // NOTE: The LiFi Diamond on Tenderly forks can be stale.  Selector
+  //       0xa83cbaa3 (or similar) may not be registered as a facet if the
+  //       fork was created before LiFi upgraded their diamond.
+  //       ➜  FIX: recreate the Tenderly fork so the diamond matches the
+  //              live chain, then this path will work.
+  if (!contractCallQuote.transactionRequest) {
+    throw new Error("contractCallQuote.transactionRequest is undefined");
+  }
 
-//   const transactionHash = await currentClient.writeContract({
-//     address: EXECUTOR_CONTRACT,
-//     abi: RESCUE_EXECUTOR_ABI,
-//     functionName: "executeRescue",
-//     args: [
-//      AAVE_USER ,
-//       OP_WETH,
-//       BigInt("8500000000000"),
-//       // Ensure calldata is a hex string; provide "0x" as a safe default and cast to the template hex type
-//       (contractCallQuote.transactionRequest?.data ?? "0x") as `0x${string}`,
-//     ],
-//   });
+  // Ensure the transaction request is a plain object acceptable to viem
+  const txRequestForSend: any = contractCallQuote.transactionRequest;
+
+//   const transactionHash = await currentClient.sendTransaction(txRequestForSend);
 
 //   console.log(`Transaction sent: ${transactionHash}`);
 
@@ -331,12 +312,44 @@ const calldata = encodeFunctionData({
 //   });
 //   console.log(`Transaction mined in block ${receipt.blockNumber}`);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // OPTION B — Route through RescueExecutor  (uncomment once the fork is
+  //            recreated so the LiFi Diamond has the required facets)
+  //
+  //  The RescueExecutor forwards `callData` to `lifiRouter` via:
+  //      target.call{value: msg.value}(callData)
+  //
+  //  `contractCallQuote.transactionRequest.data` IS the full calldata the
+  //  LiFi API expects to be sent to the Diamond.  So passing it as the
+  //  `callData` arg to executeRescue is correct — but only if the Diamond
+  //  on the fork actually has the facet for the selector in that data.
+  // ─────────────────────────────────────────────────────────────────────────
+  const transactionHash = await currentClient.writeContract({
+    address: EXECUTOR_CONTRACT,
+    abi: RESCUE_EXECUTOR_ABI,
+    functionName: "executeRescue",
+    args: [
+      AAVE_USER,
+      OP_WETH,
+      BigInt("8500000000000"),
+      (contractCallQuote.transactionRequest?.data ?? "0x") as `0x${string}`,
+    ],
+  });
+  
+  console.log(`Transaction sent: ${transactionHash}`);
+  
+  console.log("Waiting for local confirmation...");
+  const receipt = await currentPublicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+  });
+  console.log(`Transaction mined in block ${receipt.blockNumber}`);
+
   // TO-DO: SIMULATE THE CONTRACT CALL ON BASE MAINNET ON TENDERLY URL USING CHEATCODES (IF POSSIBLE ALSO MANIULATE THE HF OF AAVE CONTRACT ON TARGET CHAIN)
 
   //===========    CHECKING TOKEN BALANCES AFTER TRANSFER ==============
   // After execution, show balances for the test wallet across chains
   const balance = await getTokenBalancesByChain(
-    ETH_WHALE.address,
+    AAVE_USER,
     tokensByChain,
   );
   console.log(
@@ -368,118 +381,6 @@ const calldata = encodeFunctionData({
     });
   });
 }
-
-async function executeRouteSteps(route: Route) {
-  for (const stepInfo of route.steps) {
-    // Request transaction data for the current step
-    console.log("stepInfo:---------", stepInfo);
-    const step = await getStepTransaction(stepInfo);
-    console.log("Step transaction data received:---------", step);
-
-    // Validate transactionRequest
-    if (!step.transactionRequest) {
-      console.error("Missing transactionRequest for step", stepInfo);
-      return;
-    }
-
-    console.log("--------sending ----transaction\n");
-
-    // Choose the correct wallet and public clients for the step's fromChain
-    const fromChainId = step.action.fromChainId;
-    const currentClient = getWalletClientForChain(fromChainId);
-    const currentPublicClient = getPublicClientForChain(fromChainId);
-
-    // Remove gas fields to let viem/local node estimate them for the fork
-    const { gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas, ...txRequest } =
-      step.transactionRequest as any;
-    console.log("txn will be sent after this , txRequest:-----", txRequest);
-
-    const transactionHash = await currentClient.sendTransaction(txRequest);
-    console.log(`Transaction sent: ${transactionHash}`);
-
-    console.log("Waiting for local confirmation...");
-    const receipt = await currentPublicClient.waitForTransactionReceipt({
-      hash: transactionHash,
-    });
-    console.log(`Transaction mined in block ${receipt.blockNumber}`);
-
-    // --- SIMULATION BLOCK ---
-    // Since we are on local forks, the real bridge relayers cannot see this transaction.
-    // We must manually simulate the arrival of funds on the Destination Chain (Base).
-    // if (step.action.toChainId === ChainId.BAS) {
-    //   console.log("\n--- SIMULATING BRIDGE ARRIVAL ON BASE ---");
-    //   console.log(
-    //     "Real bridges (Squid/Axelar) cannot detect transactions on local forks.",
-    //   );
-    //   console.log(
-    //     "Manually verifying and minting tokens on Base to continue testing...",
-    //   );
-
-    //   // 1. Fund the test wallet with ETH on Base (so it can pay gas / wrap)
-    //   await baseTestClient.setBalance({
-    //     address: ETH_WHALE.address,
-    //     value: parseEther("1"),
-    //   });
-
-    //   console.log("Simulated: Funded user with 1 ETH on Base");
-
-    //   // 2. Credit USDC on Base to the test wallet by impersonating a USDC holder
-    //   const amountToMint = BigInt(step.estimate.toAmount);
-    //   console.log(
-    //     `Simulating delivery of ${amountToMint} base-token units (USDC) to ${ETH_WHALE.address}...`,
-    //   );
-
-    //   try {
-    //     // Impersonate a known USDC holder on Base and transfer USDC to the test wallet
-    //     // await baseTestClient.impersonateAccount({address: BASE_USDC_HOLDER});
-
-    //     const baseUsdcHolderClient = createWalletClient({
-    //       account: BASE_USDC_HOLDER,
-    //       chain: base,
-    //       transport: http(
-    //         "https://virtual.rpc.tenderly.co/phoenix05/project/private/base-mainnet-lifi-test/44a26a37-95b7-489f-ad45-736c821e6a34",
-    //       ),
-    //     });
-
-    //     const transferData = encodeFunctionData({
-    //       abi: USDC_ABI,
-    //       functionName: "transfer",
-    //       args: [ETH_WHALE.address, amountToMint],
-    //     });
-
-    //     await baseUsdcHolderClient.sendTransaction({
-    //       to: USDC_BASE_ADDRESS,
-    //       data: transferData,
-    //       value: 0n,
-    //     });
-
-    //     // Stop impersonation if the test client supports it
-    //     try {
-    //       //   await baseTestClient.stopImpersonatingAccount(BASE_USDC_HOLDER);
-    //     } catch (e) {
-    //       // not critical
-    //     }
-
-    //     console.log(
-    //       `Simulated: USDC transferred on Base to ${ETH_WHALE.address}`,
-    //     );
-    //   } catch (err) {
-    //     console.error(
-    //       "Failed to simulate USDC delivery by impersonation:",
-    //       err,
-    //     );
-    //     console.log(
-    //       "You may need to adjust the holder address or run this against a fork that contains the holder with balance.",
-    //     );
-    //   }
-    //   console.log("--- BRIDGE SIMULATION COMPLETE ---\n");
-    // }
-  }
-
-  console.log("All steps executed successfully");
-}
-
-
 
 // Run main
 main().catch(console.error);
