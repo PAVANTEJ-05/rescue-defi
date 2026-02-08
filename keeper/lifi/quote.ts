@@ -1,195 +1,267 @@
 /**
- * LI.FI Quote Fetcher
+ * LI.FI Quote Module for Rescue.ETH
  * 
  * ============================================================
- * WHAT THIS MODULE DOES:
+ * PRODUCTION MODULE — DO NOT MODIFY QUOTE LOGIC
  * ============================================================
- * - Fetches swap/bridge routes from LI.FI REST API
- * - Returns calldata that can be executed on-chain
- * - Validates quote response structure
+ * This module uses contractCallsQuote, NOT the standard getRoutes/getQuote.
  * 
- * ============================================================
- * WHAT THIS MODULE DOES NOT DO:
- * ============================================================
- * - Does NOT execute swaps (that's lifi/execute.ts)
- * - Does NOT supply to Aave (LI.FI doesn't know about Aave)
- * - Does NOT edit or modify calldata
- * - Does NOT simulate transactions
+ * WHY contractCallsQuote:
+ * - Standard LI.FI routes only move tokens between chains/dexes
+ * - contractCallsQuote allows executing a contract call AFTER the bridge
+ * - This is how we call Aave's supply() on the destination chain
  * 
- * ============================================================
- * LI.FI LIMITATIONS FOR RESCUE:
- * ============================================================
- * LI.FI is designed for:
- * - Cross-chain bridging (e.g., ETH mainnet → Arbitrum)
- * - DEX aggregation (e.g., swap WETH → USDC)
+ * The flow:
+ * 1. RescueExecutor pulls tokens from user via transferFrom
+ * 2. RescueExecutor calls lifiRouter with callData from this quote
+ * 3. LiFi bridges tokens (if cross-chain) and calls Aave supply()
+ * 4. User's Aave health factor is restored
  * 
- * LI.FI is NOT designed for:
- * - Same-chain, same-token transfers (returns error or no-op)
- * - Protocol-specific actions like Aave supply
- * 
- * For same-chain rescues where the user already has the correct
- * token, LI.FI adds unnecessary complexity. Consider direct
- * AavePool.supply() instead.
+ * Without contractCallsQuote, tokens would arrive but NOT be deposited
+ * into Aave, defeating the purpose of the rescue.
  * ============================================================
- * 
- * PRODUCTION RULES:
- * - Keeper fetches route + calldata
- * - Keeper NEVER edits calldata
- * - No balance mutation
- * - No bridge simulation
  */
 
-import type { LiFiQuote } from '../config/types.js';
-import { logger } from '../utils/logger.js';
+import { getContractCallsQuote } from '@lifi/sdk';
+import { encodeFunctionData, parseAbi } from 'viem';
+import type { ContractCallsQuoteRequest, LiFiQuoteResponse } from './types.js';
+
+// ============================================================
+// AAVE SUPPLY CALLDATA ENCODING
+// ============================================================
 
 /**
- * LI.FI API base URL
+ * Aave V3 Pool ABI (minimal subset for supply)
+ * 
+ * The supply function deposits collateral on behalf of a user.
+ * Parameters:
+ * - asset: Token to supply (USDC)
+ * - amount: Amount in token units
+ * - onBehalfOf: User receiving the collateral credit
+ * - referralCode: Set to 0 (no referral)
  */
-const LIFI_API_BASE = 'https://li.quest/v1';
+export const AAVE_POOL_ABI = parseAbi([
+  // Read: Get user's aggregate position data
+  'function getUserAccountData(address user) view returns (' +
+    'uint256 totalCollateralBase,' +
+    'uint256 totalDebtBase,' +
+    'uint256 availableBorrowsBase,' +
+    'uint256 currentLiquidationThreshold,' +
+    'uint256 ltv,' +
+    'uint256 healthFactor' +
+    ')',
+
+  // Write: Supply collateral
+  'function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)',
+]);
+
+// ============================================================
+// CALLDATA ENCODING
+// ============================================================
 
 /**
- * LI.FI Quote Request parameters
+ * Encode Aave supply() calldata
+ * 
+ * This creates the data payload that LI.FI will execute on Base
+ * after the bridge completes.
+ * 
+ * @param tokenAddress - Token to supply (e.g., USDC on Base)
+ * @param amount - Amount in token units (e.g., 8500000 = 8.5 USDC)
+ * @param onBehalfOf - User address receiving collateral credit
+ * @returns Encoded calldata as hex string
  */
-export interface QuoteRequest {
+export function encodeAaveSupplyCalldata(
+  tokenAddress: `0x${string}`,
+  amount: bigint,
+  onBehalfOf: `0x${string}`
+): `0x${string}` {
+  return encodeFunctionData({
+    abi: AAVE_POOL_ABI,
+    functionName: 'supply',
+    args: [tokenAddress, amount, onBehalfOf, 0], // referralCode = 0
+  });
+}
+
+// ============================================================
+// QUOTE FUNCTIONS
+// ============================================================
+
+/**
+ * Parameters for creating a contract calls quote request
+ * 
+ * CRITICAL: fromAddress MUST be the executor contract address (not the user).
+ * After the contract pulls tokens from the user via transferFrom, the executor
+ * holds the tokens. LiFi needs to know the executor is the sender.
+ * 
+ * The aavePoolAddress MUST match the Aave pool for the destination chain.
+ * It is NOT hardcoded — callers must provide the chain-specific address from chainConfig.
+ */
+export interface QuoteParams {
+  /** Executor contract address — the entity that holds tokens and initiates the LiFi call */
+  fromAddress: `0x${string}`;
   /** Source chain ID */
   fromChain: number;
+  /** Source token address */
+  fromToken: `0x${string}`;
+  /** Amount to send (in token units as string) */
+  fromAmount: string;
   /** Destination chain ID */
   toChain: number;
-  /** Source token address (use 0x0...0 for native) */
-  fromToken: string;
   /** Destination token address */
-  toToken: string;
-  /** Amount in smallest units (wei for ETH) */
-  fromAmount: string;
-  /** Address that will send the tokens */
-  fromAddress: string;
-  /** Address that will receive the tokens (usually same as fromAddress) */
-  toAddress: string;
+  toToken: `0x${string}`;
+  /** User address to receive Aave collateral credit */
+  beneficiary: `0x${string}`;
+  /** Chain-specific Aave V3 Pool address for the supply() call */
+  aavePoolAddress: `0x${string}`;
 }
 
 /**
- * LI.FI API response structure (simplified)
- */
-interface LiFiApiResponse {
-  transactionRequest?: {
-    to: string;
-    data: string;
-    value: string;
-    gasLimit?: string;
-  };
-  estimate?: {
-    toAmount: string;
-    toAmountMin: string;
-  };
-  action?: {
-    fromToken: { symbol: string };
-    toToken: { symbol: string };
-  };
-}
-
-/**
- * Fetch a swap/bridge quote from LI.FI
+ * Build a contract calls quote request for Aave supply
  * 
- * @param request - Quote parameters
- * @returns Quote with calldata for execution, or null on failure
+ * This constructs the full request payload for LI.FI's contractCallsQuote API.
+ * The request includes both the bridge parameters AND the contract call to execute.
+ * 
+ * @param params - Quote parameters
+ * @returns Formatted request object for getContractCallsQuote
  */
-export async function getQuote(request: QuoteRequest): Promise<LiFiQuote | null> {
-  logger.lifi.info('Fetching quote', {
-    fromChain: request.fromChain,
-    toChain: request.toChain,
-    fromToken: request.fromToken.slice(0, 10),
-    amount: request.fromAmount,
-  });
+export function buildContractCallsQuoteRequest(params: QuoteParams): ContractCallsQuoteRequest {
+  const {
+    fromAddress,
+    fromChain,
+    fromToken,
+    fromAmount,
+    toChain,
+    toToken,
+    beneficiary,
+  } = params;
 
-  try {
-    // Build query string
-    const params = new URLSearchParams({
-      fromChain: request.fromChain.toString(),
-      toChain: request.toChain.toString(),
-      fromToken: request.fromToken,
-      toToken: request.toToken,
-      fromAmount: request.fromAmount,
-      fromAddress: request.fromAddress,
-      toAddress: request.toAddress,
-      // Request transaction data directly
-      order: 'RECOMMENDED',
-      slippage: '0.03', // 3% slippage tolerance
-      allowBridges: 'stargate,hop,across,cbridge', // Popular bridges
-      allowExchanges: 'all',
-    });
+  // Encode the Aave supply calldata
+  const supplyCalldata = encodeAaveSupplyCalldata(
+    toToken,
+    BigInt(fromAmount),
+    beneficiary
+  );
 
-    const url = `${LIFI_API_BASE}/quote?${params.toString()}`;
-    
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
+  return {
+    fromAddress,
+    fromChain,
+    fromToken,
+    toAmount: fromAmount, // Expected output equals input for stablecoin bridges
+    toChain,
+    toToken,
+    contractCalls: [
+      {
+        fromAmount,
+        fromTokenAddress: toToken, // Token on destination chain
+        toContractAddress: params.aavePoolAddress, // Chain-specific Aave pool (not hardcoded)
+        toContractCallData: supplyCalldata,
+        toContractGasLimit: '500000', // Conservative gas limit for Aave supply
+        toApprovalAddress: params.aavePoolAddress, // LiFi must approve Aave pool to spend tokens
       },
-    });
+    ],
+  };
+}
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      logger.lifi.error('LI.FI API error', {
-        status: response.status,
-        error: errorText.slice(0, 200),
-      });
-      return null;
-    }
-
-    const data: LiFiApiResponse = await response.json() as LiFiApiResponse;
-
-    // Validate response has transaction data
-    if (!data.transactionRequest) {
-      logger.lifi.error('No transaction data in LI.FI response');
-      return null;
-    }
-
-    const quote: LiFiQuote = {
-      to: data.transactionRequest.to,
-      data: data.transactionRequest.data,
-      value: data.transactionRequest.value || '0',
-      estimatedOutput: data.estimate?.toAmountMin || '0',
-    };
-
-    logger.lifi.info('Quote received', {
-      router: quote.to.slice(0, 10),
-      estimatedOutput: quote.estimatedOutput,
-      valueWei: quote.value,
-    });
-
+/**
+ * Fetch a contract calls quote from LI.FI
+ * 
+ * This is the main entry point for getting a rescue quote.
+ * The quote contains all the routing info + contract call execution data.
+ * 
+ * @param request - The contract calls quote request
+ * @returns Quote response with transaction data, or null on failure
+ */
+export async function fetchContractCallsQuote(
+  request: ContractCallsQuoteRequest
+): Promise<any> {
+  try {
+    const quote = await getContractCallsQuote(request);
     return quote;
   } catch (error) {
-    logger.lifi.error('Failed to fetch quote', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+    console.error('Failed to fetch contract calls quote:', error);
+    return null;
+  }
+}
+
+// ============================================================
+// KEEPER INTEGRATION
+// ============================================================
+
+/**
+ * Quote request parameters for keeper integration
+ * (Aligned with keeper loop/tick.ts expectations)
+ * 
+ * CRITICAL:
+ * - executorAddress is used as LiFi's fromAddress (executor holds tokens after transferFrom)
+ * - beneficiary is the user receiving Aave supply credit
+ * - aavePoolAddress must be the correct pool for the target chain
+ */
+export interface GetQuoteParams {
+  fromChain: number;
+  toChain: number;
+  fromToken: string;
+  toToken: string;
+  fromAmount: string;
+  /** RescueExecutor contract address — becomes LiFi's fromAddress */
+  executorAddress: string;
+  /** User address receiving Aave collateral credit */
+  beneficiary: string;
+  /** Chain-specific Aave V3 Pool address */
+  aavePoolAddress: string;
+}
+
+/**
+ * Get a LI.FI quote for the keeper
+ * 
+ * This function is designed to match the interface expected by keeper/index.ts.
+ * It wraps the contract calls quote logic for simple integration.
+ * 
+ * @param params - Quote parameters
+ * @returns Simplified quote response for keeper use
+ */
+export async function getQuote(params: GetQuoteParams): Promise<LiFiQuoteResponse | null> {
+  try {
+    // Build the contract calls quote request
+    // CRITICAL: fromAddress = executor contract (holds tokens after transferFrom)
+    const request = buildContractCallsQuoteRequest({
+      fromAddress: params.executorAddress as `0x${string}`,
+      fromChain: params.fromChain,
+      fromToken: params.fromToken as `0x${string}`,
+      fromAmount: params.fromAmount,
+      toChain: params.toChain,
+      toToken: params.toToken as `0x${string}`,
+      beneficiary: params.beneficiary as `0x${string}`,
+      aavePoolAddress: params.aavePoolAddress as `0x${string}`,
     });
+
+    const quote = await fetchContractCallsQuote(request);
+    if (!quote?.transactionRequest) {
+      return null;
+    }
+
+    // Extract what the keeper needs
+    return {
+      to: quote.transactionRequest.to,
+      data: quote.transactionRequest.data,
+      value: quote.transactionRequest.value?.toString() ?? '0',
+      estimatedOutput: quote.estimate?.toAmount,
+    };
+  } catch (error) {
+    console.error('getQuote failed:', error);
     return null;
   }
 }
 
 /**
- * Get quote for same-chain swap (simpler case)
+ * Validate that a quote targets the expected LI.FI router
+ * 
+ * Security check: Ensure we're sending funds to the official LI.FI contract,
+ * not a malicious address returned by a compromised API.
+ * 
+ * @param quote - The quote response
+ * @param expectedRouter - Expected LI.FI router address
+ * @returns True if quote target matches expected router
  */
-export async function getSameChainQuote(
-  chainId: number,
-  fromToken: string,
-  toToken: string,
-  amount: string,
-  userAddress: string
-): Promise<LiFiQuote | null> {
-  return getQuote({
-    fromChain: chainId,
-    toChain: chainId,
-    fromToken,
-    toToken,
-    fromAmount: amount,
-    fromAddress: userAddress,
-    toAddress: userAddress,
-  });
-}
-
-/**
- * Validate that a quote target is the expected LI.FI router
- */
-export function isValidQuoteTarget(quote: LiFiQuote, expectedRouter: string): boolean {
+export function isValidQuoteTarget(quote: LiFiQuoteResponse, expectedRouter: string): boolean {
   return quote.to.toLowerCase() === expectedRouter.toLowerCase();
 }

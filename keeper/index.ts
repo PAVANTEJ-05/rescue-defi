@@ -1,135 +1,56 @@
 /**
- * Rescue.ETH Keeper Main Loop
+ * Rescue.ETH Keeper - Bootstrap & Entry Point
  * 
  * ============================================================
  * WHAT THIS MODULE DOES:
  * ============================================================
- * - Orchestrates the full rescue flow end-to-end
- * - Reads user health factor from Aave V3
- * - Reads rescue policy from ENS text records
- * - Computes required supply amount
- * - Fetches LI.FI quote for token routing
- * - Submits transaction via RescueExecutor
+ * - Loads configuration from environment
+ * - Creates providers and signer
+ * - Starts the continuous monitoring loop
  * 
  * ============================================================
- * WHAT THIS MODULE DOES NOT DO:
+ * PRODUCTION SAFETY:
  * ============================================================
- * - Does NOT discover users automatically (users must be registered)
- * - Does NOT handle user onboarding (approvals, ENS setup)
+ * - Users must have rescue.enabled=true in ENS
+ * - Only stablecoins are supported (price = $1)
+ * - Capped rescues that won't restore HF are REJECTED
+ * - Cooldown is enforced by contract (off-chain is informational)
  * 
  * ============================================================
- * CRITICAL ARCHITECTURAL NOTE:
+ * ARCHITECTURE:
  * ============================================================
- * LI.FI is a ROUTING/BRIDGING service - it moves tokens between chains/dexes.
- * LI.FI does NOT automatically supply tokens to Aave.
- * 
- * For a rescue to actually supply collateral to Aave, ONE of these must happen:
- * 
- * Option A: LI.FI Hooks (if supported)
- *   - Some LI.FI routes support "post-swap hooks"
- *   - The hook would call AavePool.supply() after the swap
- *   - This requires LI.FI to support the destination call
- * 
- * Option B: Two-step execution
- *   - Step 1: LI.FI routes/swaps tokens to destination chain
- *   - Step 2: Separate call to AavePool.supply()
- *   - RescueExecutor would need modification
- * 
- * Option C: Direct supply (no LI.FI for same-chain)
- *   - If user already has the right token on the right chain
- *   - Skip LI.FI entirely, call AavePool.supply() directly
- *   - This is the simplest path for same-chain rescues
- * 
- * CURRENT STATE: This code fetches LI.FI quote but the final
- * AavePool.supply() step is NOT implemented. The rescued tokens
- * would arrive but NOT be deposited as collateral.
- * 
- * TODO: Implement the Aave supply step (Option B or C)
+ * - index.ts (this file) → Bootstrap only
+ * - loop/tick.ts → One monitoring cycle
+ * - loop/runner.ts → Infinite loop with timing
+ * - aave/ → Health factor monitoring
+ * - ens/ → Policy configuration
+ * - lifi/ → Transaction execution
  * ============================================================
- * 
- * Flow:
- * 1. For each monitored user ENS name
- * 2. Read ENS policy configuration
- * 3. Check if chain is allowed by policy
- * 4. Check cooldown
- * 5. Read Aave health factor
- * 6. If HF >= minHF → skip (healthy)
- * 7. Compute required collateral supply
- * 8. Select token from policy.allowedTokens
- * 9. Fetch LI.FI route (for cross-chain/swap)
- * 10. Execute via RescueExecutor
- * 
- * Rules:
- * - Stateless (no database)
- * - Deterministic
- * - Idempotent
- * - Keeper pays gas and msg.value
  */
 
-import { JsonRpcProvider, Wallet, type Provider, type Signer } from 'ethers';
+import { JsonRpcProvider, Wallet } from 'ethers';
 import { config } from 'dotenv';
+import { createConfig as createLiFiConfig } from '@lifi/sdk';
 
 // Config
-import type { RescuePolicy, MonitoredUser, RescueResult } from './config/types.js';
-import { getChainConfig, getTokenAddress, CHAIN_IDS } from './config/chains.js';
+import type { MonitoredUser } from './config/types.js';
+import { getChainConfig } from './config/chains.js';
 
-// Aave
-import { getUserAccountData, needsRescue, getRiskLevel } from './aave/monitor.js';
-import { computeRequiredSupply, estimateNewHealthFactor } from './aave/math.js';
+// Loop
+import { runForever, type TickContext, type RunnerConfig } from './loop/index.js';
 
-// ENS
-import { readEnsConfig } from './ens/reader.js';
-import { parseEnsConfig, isChainAllowed } from './ens/parser.js';
-
-// LI.FI
-import { getQuote, isValidQuoteTarget } from './lifi/quote.js';
-import { executeRescue, isCooldownPassed, type ExecuteParams } from './lifi/execute.js';
+// Cross-chain rescue (execute.ts integration)
+import { loadCrossChainConfig } from './lifi/crosschain-rescue.js';
 
 // Utils
 import { logger } from './utils/logger.js';
-import { usdToTokenUnits } from './utils/units.js';
 
 // Load environment variables
 config();
 
-/**
- * Token info for selection
- */
-interface TokenInfo {
-  symbol: string;
-  decimals: number;
-}
-
-/**
- * Token decimals by symbol (common tokens)
- * In production, this would come from on-chain or a token list API
- */
-const TOKEN_DECIMALS: Record<string, number> = {
-  USDC: 6,
-  USDT: 6,
-  DAI: 18,
-  WETH: 18,
-  WBTC: 8,
-};
-
-/**
- * Select first allowed token that exists on the target chain
- * 
- * @param allowedTokens - Token symbols from ENS policy
- * @param chainId - Target chain ID
- * @returns Token info or null if none available
- */
-function selectTokenFromPolicy(allowedTokens: string[], chainId: number): TokenInfo | null {
-  for (const symbol of allowedTokens) {
-    // Check if token exists on this chain
-    const address = getTokenAddress(chainId, symbol);
-    if (address) {
-      const decimals = TOKEN_DECIMALS[symbol] || 18;
-      return { symbol, decimals };
-    }
-  }
-  return null;
-}
+// ============================================================
+// CONFIGURATION
+// ============================================================
 
 /**
  * Keeper configuration from environment
@@ -145,296 +66,303 @@ interface KeeperConfig {
   rpcUrl?: string | undefined;
   /** Polling interval in milliseconds */
   pollIntervalMs: number;
-  /** Demo mode - use defaults if ENS missing */
+  /** Demo mode - use defaults if ENS missing (does NOT bypass consent) */
   demoMode: boolean;
 }
 
 /**
  * Load configuration from environment
+ * 
+ * CRITICAL: All required environment variables are validated here.
+ * Missing or invalid values will cause the keeper to fail fast at startup.
  */
 function loadConfig(): KeeperConfig {
+  // Validate KEEPER_PRIVATE_KEY
   const privateKey = process.env['KEEPER_PRIVATE_KEY'];
   if (!privateKey) {
     throw new Error('KEEPER_PRIVATE_KEY environment variable required');
   }
+  
+  // Validate private key format (should be 64 hex chars with optional 0x prefix)
+  const cleanPrivateKey = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
+  if (!/^[a-fA-F0-9]{64}$/.test(cleanPrivateKey)) {
+    throw new Error('KEEPER_PRIVATE_KEY must be a valid 32-byte hex string');
+  }
 
+  // Validate EXECUTOR_ADDRESS
   const executorAddress = process.env['EXECUTOR_ADDRESS'];
   if (!executorAddress) {
     throw new Error('EXECUTOR_ADDRESS environment variable required');
   }
 
-  return {
-    privateKey,
-    executorAddress,
-    chainId: parseInt(process.env['CHAIN_ID'] || '1', 10),
-    rpcUrl: process.env['RPC_URL'],
-    pollIntervalMs: parseInt(process.env['POLL_INTERVAL_MS'] || '60000', 10),
-    demoMode: process.env['DEMO_MODE'] === 'true',
-  };
-}
-
-/**
- * Process a single user - check if rescue needed and execute
- */
-async function processUser(
-  user: MonitoredUser,
-  chainConfig: ReturnType<typeof getChainConfig>,
-  provider: Provider,
-  mainnetProvider: Provider,
-  signer: Signer,
-  executorAddress: string,
-  demoMode: boolean
-): Promise<RescueResult | null> {
-  const { address: userAddress, ensName } = user;
-
-  logger.keeper.info('Processing user', { user: userAddress.slice(0, 10), ens: ensName });
-
-  // Step 1: Read ENS policy (always from mainnet)
-  const rawConfig = await readEnsConfig(ensName, mainnetProvider);
-  if (!rawConfig && !demoMode) {
-    logger.keeper.warn('No ENS config found, skipping', { ens: ensName });
-    return null;
+  // Validate executor address format
+  if (!executorAddress.startsWith('0x') || executorAddress.length !== 42) {
+    throw new Error('EXECUTOR_ADDRESS must be a valid Ethereum address (0x + 40 hex chars)');
   }
-
-  const policy = parseEnsConfig(rawConfig || {}, demoMode);
-  if (!policy) {
-    logger.keeper.error('Failed to parse ENS config', { ens: ensName });
-    return null;
-  }
-
-  // Step 2: Check if chain is allowed by policy
-  if (!isChainAllowed(chainConfig.chainId, policy)) {
-    logger.keeper.debug('Chain not allowed by policy', {
-      chainId: chainConfig.chainId,
-      allowed: policy.allowedChains,
-    });
-    return null;
-  }
-
-  // Step 3: Check cooldown
-  const cooldownPassed = await isCooldownPassed(
-    executorAddress,
-    userAddress,
-    policy.cooldownSeconds,
-    signer
-  );
-  if (!cooldownPassed) {
-    logger.keeper.debug('Cooldown active, skipping', { user: userAddress.slice(0, 10) });
-    return null;
-  }
-
-  // Step 4: Read Aave position
-  const accountData = await getUserAccountData(chainConfig.aavePool, userAddress, provider);
-  if (!accountData) {
-    logger.keeper.error('Failed to read Aave data', { user: userAddress.slice(0, 10) });
-    return null;
-  }
-
-  // Step 5: Check if rescue needed
-  if (!needsRescue(accountData, policy.minHF)) {
-    logger.keeper.debug('Position healthy, skipping', {
-      user: userAddress.slice(0, 10),
-      hf: accountData.healthFactor.toFixed(4),
-      minHF: policy.minHF,
-    });
-    return null;
-  }
-
-  logger.keeper.info('Rescue needed', {
-    user: userAddress.slice(0, 10),
-    hf: accountData.healthFactor.toFixed(4),
-    risk: getRiskLevel(accountData.healthFactor),
-  });
-
-  // Step 6: Compute required supply
-  const supplyCalc = computeRequiredSupply(accountData, policy);
-  if (supplyCalc.amountUSD <= 0) {
-    logger.keeper.debug('No supply needed', { reason: supplyCalc.reason });
-    return null;
-  }
-
-  logger.keeper.info('Supply calculation', {
-    amountUSD: supplyCalc.amountUSD.toFixed(2),
-    reason: supplyCalc.reason,
-    estimatedNewHF: estimateNewHealthFactor(accountData, supplyCalc.amountUSD).toFixed(4),
-  });
-
-  // Step 7: Determine token to use from ENS allowedTokens
-  // Policy lists which tokens the user approves for rescue
-  // We pick the first one that exists on this chain
-  const supplyToken = selectTokenFromPolicy(policy.allowedTokens, chainConfig.chainId);
-  if (!supplyToken) {
-    logger.keeper.error('No allowed token available on chain', {
-      allowedTokens: policy.allowedTokens,
-      chainId: chainConfig.chainId,
-    });
-    return null;
-  }
-
-  const tokenAddress = getTokenAddress(chainConfig.chainId, supplyToken.symbol);
-  if (!tokenAddress) {
-    logger.keeper.error('Token address not found', {
-      token: supplyToken.symbol,
-      chainId: chainConfig.chainId,
-    });
-    return null;
-  }
-
-  logger.keeper.info('Selected token from policy', {
-    symbol: supplyToken.symbol,
-    decimals: supplyToken.decimals,
-    address: tokenAddress.slice(0, 10),
-  });
-
-  // Convert USD to token units
-  // TODO: Fetch actual token price from oracle/API instead of assuming $1
-  const tokenPrice = 1.0; // CRITICAL: This assumes all tokens = $1 (only valid for stablecoins)
-  const tokenAmount = usdToTokenUnits(supplyCalc.amountUSD, tokenPrice, supplyToken.decimals);
-
-  // Step 8: Get LI.FI quote
-  // 
-  // IMPORTANT: LI.FI is for ROUTING - cross-chain bridges and DEX swaps.
-  // For same-chain, same-token operations, LI.FI is unnecessary overhead.
-  // 
-  // Current behavior: We request a quote even for same-chain same-token,
-  // which LI.FI may reject or return a no-op. This is a known limitation.
-  //
-  // TODO: For same-chain rescues where user already has the right token,
-  // skip LI.FI entirely and call AavePool.supply() directly.
-  //
-  const isSameChainSameToken = true; // Simplified: we're always using same chain for now
   
-  if (isSameChainSameToken) {
-    logger.keeper.warn('Same-chain same-token rescue - LI.FI not needed', {
-      note: 'TODO: Implement direct AavePool.supply() path',
-    });
-    // For now, we still try LI.FI, but this should be refactored
+  // Validate address is valid hex
+  if (!/^0x[a-fA-F0-9]{40}$/.test(executorAddress)) {
+    throw new Error('EXECUTOR_ADDRESS contains invalid characters');
   }
 
-  const quote = await getQuote({
-    fromChain: chainConfig.chainId,
-    toChain: chainConfig.chainId,
-    fromToken: tokenAddress,
-    toToken: tokenAddress, // Same token - this is suboptimal, see note above
-    fromAmount: tokenAmount.toString(),
-    fromAddress: userAddress,
-    toAddress: userAddress,
-  });
-
-  if (!quote) {
-    logger.keeper.error('Failed to get LI.FI quote');
-    return null;
+  // Validate CHAIN_ID
+  const chainIdStr = process.env['CHAIN_ID'] || '1';
+  const chainId = parseInt(chainIdStr, 10);
+  if (isNaN(chainId) || chainId <= 0) {
+    throw new Error(`Invalid CHAIN_ID: ${chainIdStr}`);
   }
 
-  // Validate quote target
-  if (!isValidQuoteTarget(quote, chainConfig.lifiRouter)) {
-    logger.keeper.error('Quote target mismatch', {
-      expected: chainConfig.lifiRouter,
-      got: quote.to,
-    });
-    return null;
+  // Validate RPC_URL if provided
+  const rpcUrl = process.env['RPC_URL'];
+  if (rpcUrl && !rpcUrl.startsWith('http://') && !rpcUrl.startsWith('https://') && !rpcUrl.startsWith('ws://') && !rpcUrl.startsWith('wss://')) {
+    throw new Error('RPC_URL must be a valid HTTP(S) or WebSocket URL');
   }
 
-  // Step 9: Execute rescue
-  const executeParams: ExecuteParams = {
-    userAddress,
-    tokenIn: tokenAddress,
-    amountIn: tokenAmount,
-    quote,
-    amountUSD: supplyCalc.amountUSD,
+  // Validate POLL_INTERVAL_MS
+  const pollIntervalStr = process.env['POLL_INTERVAL_MS'] || '30000';
+  const pollIntervalMs = parseInt(pollIntervalStr, 10);
+  if (isNaN(pollIntervalMs) || pollIntervalMs < 1000) {
+    throw new Error('POLL_INTERVAL_MS must be at least 1000ms');
+  }
+
+  const demoMode = process.env['DEMO_MODE'] === 'true';
+
+  return {
+    privateKey: privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`,
+    executorAddress,
+    chainId,
+    rpcUrl,
+    pollIntervalMs,
+    demoMode,
   };
-
-  return executeRescue(executorAddress, executeParams, signer);
 }
 
+// ============================================================
+// MONITORED USERS
+// ============================================================
+
 /**
- * Main keeper loop
+ * Load monitored users
+ * 
+ * Users can be configured via:
+ * - MONITORED_USERS env var: JSON array of {address, ensName} objects
+ *   Example: MONITORED_USERS='[{"address":"0x123...","ensName":"alice.eth"}]'
+ * - Hardcoded fallback (demo only, warns loudly)
+ * 
+ * In production, implement one of:
+ * - A registry contract (on-chain discovery)
+ * - An off-chain database / API
+ * - Event scanning for approval events on the executor
  */
-async function runKeeper(): Promise<void> {
-  logger.keeper.info('Starting Rescue.ETH Keeper');
+function loadMonitoredUsers(): MonitoredUser[] {
+  const envUsers = process.env['MONITORED_USERS'];
+  
+  if (envUsers) {
+    try {
+      const parsed = JSON.parse(envUsers) as MonitoredUser[];
+      if (!Array.isArray(parsed)) {
+        throw new Error('MONITORED_USERS must be a JSON array');
+      }
+      // Validate each user
+      for (const user of parsed) {
+        if (!user.address || !user.address.startsWith('0x') || user.address.length !== 42) {
+          throw new Error(`Invalid user address: ${user.address}`);
+        }
+        if (user.ensName === undefined) {
+          user.ensName = '';
+        }
+      }
+      logger.keeper.info('Loaded monitored users from MONITORED_USERS env var', {
+        count: parsed.length,
+      });
+      return parsed;
+    } catch (error) {
+      throw new Error(`Failed to parse MONITORED_USERS: ${error instanceof Error ? error.message : 'Unknown'}`);
+    }
+  }
+
+  // Fallback: hardcoded demo users (warn loudly)
+  logger.keeper.warn('MONITORED_USERS env var not set — using hardcoded demo list');
+  logger.keeper.warn('For production, set MONITORED_USERS as a JSON array');
+  
+  const users: MonitoredUser[] = [
+    { address: '0xcaf4bfb53e07fd02e7e46894564d7caac3d9b35b', ensName: 'nick.eth' },
+  ];
+
+  return users;
+}
+
+// ============================================================
+// BOOTSTRAP
+// ============================================================
+
+/**
+ * Bootstrap and start the keeper
+ */
+async function bootstrap(): Promise<void> {
+  logger.keeper.info('='.repeat(60));
+  logger.keeper.info('Rescue.ETH Keeper Starting - PRODUCTION MODE');
+  logger.keeper.info('='.repeat(60));
 
   // Load config
-  const config = loadConfig();
-  const chainConfig = getChainConfig(config.chainId);
+  const keeperConfig = loadConfig();
+  const chainConfig = getChainConfig(keeperConfig.chainId);
 
   logger.keeper.info('Configuration loaded', {
     chain: chainConfig.name,
-    chainId: config.chainId,
-    executor: config.executorAddress.slice(0, 10),
-    pollInterval: config.pollIntervalMs,
-    demoMode: config.demoMode,
+    chainId: keeperConfig.chainId,
+    executor: keeperConfig.executorAddress.slice(0, 10) + '...',
+    pollIntervalMs: keeperConfig.pollIntervalMs,
+    demoMode: keeperConfig.demoMode,
   });
 
-  // Setup providers and signer
-  const rpcUrl = config.rpcUrl || chainConfig.rpcUrl;
+  // Initialize LI.FI SDK - required before calling getContractCallsQuote
+  // Only the integrator name is needed; RPC URLs are not required for API calls.
+  // The SDK uses its own routing API (li.quest) to compute quotes.
+  createLiFiConfig({ integrator: 'rescue-eth' });
+  logger.keeper.info('LI.FI SDK initialized');
+
+  // PRODUCTION SAFETY WARNINGS
+  if (keeperConfig.demoMode) {
+    logger.keeper.warn('='.repeat(60));
+    logger.keeper.warn('DEMO MODE ENABLED');
+    logger.keeper.warn('Fallback defaults will be used if ENS records missing');
+    logger.keeper.warn('Users STILL require rescue.enabled=true to be rescued');
+    logger.keeper.warn('='.repeat(60));
+  } else {
+    logger.keeper.info('Production mode: Users must configure ENS records');
+    logger.keeper.info('Required: rescue.enabled=true for any rescue to execute');
+  }
+
+  // Setup providers
+  const rpcUrl = keeperConfig.rpcUrl || chainConfig.rpcUrl;
   const provider = new JsonRpcProvider(rpcUrl);
-  const mainnetProvider = new JsonRpcProvider('https://eth.llamarpc.com'); // ENS always on mainnet
-  const signer = new Wallet(config.privateKey, provider);
+  
+  // ENS is always on mainnet — use dedicated mainnet RPC
+  const mainnetRpcUrl = process.env['MAINNET_RPC_URL'] || 'https://eth.llamarpc.com';
+  const mainnetProvider = new JsonRpcProvider(mainnetRpcUrl);
 
+  if (!process.env['MAINNET_RPC_URL']) {
+    logger.keeper.warn('MAINNET_RPC_URL not set — using public fallback (https://eth.llamarpc.com)');
+    logger.keeper.warn('For production, set MAINNET_RPC_URL to a dedicated mainnet RPC endpoint');
+  }
+
+  // Validate provider connections
+  try {
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== keeperConfig.chainId) {
+      throw new Error(`Provider chainId ${network.chainId} does not match config ${keeperConfig.chainId}`);
+    }
+    logger.keeper.info('Provider connected', { 
+      chainId: Number(network.chainId),
+      rpcUrl: rpcUrl.slice(0, 30) + '...',
+    });
+  } catch (error) {
+    throw new Error(`Failed to connect to provider: ${error instanceof Error ? error.message : 'Unknown'}`);
+  }
+
+  // Setup signer
+  const signer = new Wallet(keeperConfig.privateKey, provider);
   const keeperAddress = await signer.getAddress();
-  logger.keeper.info('Keeper wallet', { address: keeperAddress.slice(0, 10) });
+  
+  // Log keeper address for verification
+  logger.keeper.info('Keeper wallet initialized', {
+    address: keeperAddress,
+    shortAddress: keeperAddress.slice(0, 10) + '...',
+  });
 
-  // Demo users to monitor (in production, this would come from a registry or events)
-  const monitoredUsers: MonitoredUser[] = [
-    // Add users to monitor here
-    // { address: '0x...', ensName: 'user.eth' },
-  ];
+  // Verify keeper has some ETH for gas (warning only, don't block)
+  try {
+    const balance = await provider.getBalance(keeperAddress);
+    const balanceEth = Number(balance) / 1e18;
+    if (balanceEth < 0.01) {
+      logger.keeper.warn('LOW KEEPER BALANCE: Keeper wallet has very low ETH balance', {
+        address: keeperAddress,
+        balanceEth: balanceEth.toFixed(6),
+        recommendation: 'Fund the keeper wallet with at least 0.1 ETH for gas',
+      });
+    } else {
+      logger.keeper.info('Keeper balance verified', {
+        balanceEth: balanceEth.toFixed(4),
+      });
+    }
+  } catch (error) {
+    logger.keeper.warn('Could not verify keeper balance', {
+      error: error instanceof Error ? error.message : 'Unknown',
+    });
+  }
 
-  // Check if we have users to monitor
+  // Load monitored users
+  const monitoredUsers = loadMonitoredUsers();
+  
   if (monitoredUsers.length === 0) {
     logger.keeper.warn('No users configured to monitor');
-    logger.keeper.info('Add users to monitoredUsers array in index.ts');
-    logger.keeper.info('Keeper ready but idle');
-    return;
+    logger.keeper.warn('Add users to loadMonitoredUsers() in index.ts');
+    logger.keeper.info('Keeper will run but tick will be a no-op');
+  } else {
+    logger.keeper.info('Monitored users loaded', {
+      count: monitoredUsers.length,
+      users: monitoredUsers.map(u => u.ensName || u.address.slice(0, 10) + '...'),
+    });
   }
 
-  // Main loop
-  async function loop(): Promise<void> {
-    logger.keeper.info('Starting monitoring cycle', { users: monitoredUsers.length });
-
-    for (const user of monitoredUsers) {
-      try {
-        const result = await processUser(
-          user,
-          chainConfig,
-          provider,
-          mainnetProvider,
-          signer,
-          config.executorAddress,
-          config.demoMode
-        );
-
-        if (result?.success) {
-          logger.keeper.info('Rescue successful', {
-            user: user.address.slice(0, 10),
-            txHash: result.txHash,
-            amountUSD: result.amountUSD.toFixed(2),
-          });
-        }
-      } catch (error) {
-        logger.keeper.error('Error processing user', {
-          user: user.address.slice(0, 10),
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-      }
-    }
-
-    logger.keeper.info('Monitoring cycle complete');
+  // Load cross-chain rescue configuration (execute.ts integration)
+  const crossChainConfig = loadCrossChainConfig();
+  if (crossChainConfig) {
+    logger.keeper.info('Cross-chain rescue ENABLED (execute.ts integration)', {
+      destChainId: crossChainConfig.destChainId,
+      sourceToken: crossChainConfig.sourceTokenAddress.slice(0, 10) + '...',
+      destToken: crossChainConfig.destTokenAddress.slice(0, 10) + '...',
+      amount: crossChainConfig.amount.toString(),
+      destAavePool: crossChainConfig.destAavePool.slice(0, 10) + '...',
+    });
+  } else {
+    logger.keeper.info('Cross-chain rescue disabled (same-chain mode)');
   }
 
-  // Run immediately, then schedule
-  await loop();
+  // Build tick context
+  const tickContext: TickContext = {
+    chainConfig,
+    provider,
+    mainnetProvider,
+    signer,
+    executorAddress: keeperConfig.executorAddress,
+    demoMode: keeperConfig.demoMode,
+    monitoredUsers,
+    ...(crossChainConfig ? { crossChainConfig } : {}),
+  };
 
-  // Schedule recurring execution
-  setInterval(loop, config.pollIntervalMs);
+  // Build runner config
+  const runnerConfig: RunnerConfig = {
+    pollIntervalMs: keeperConfig.pollIntervalMs,
+    tickContext,
+  };
 
-  logger.keeper.info('Keeper running', { interval: `${config.pollIntervalMs}ms` });
+  logger.keeper.info('='.repeat(60));
+  logger.keeper.info('PRODUCTION SAFETY INVARIANTS:');
+  logger.keeper.info('  1. Users must have rescue.enabled=true in ENS');
+  logger.keeper.info('  2. Only stablecoins (USDC, USDT, DAI) are supported');
+  logger.keeper.info('  3. Capped rescues that won\'t restore HF are REJECTED');
+  logger.keeper.info('  4. Cooldown is enforced by on-chain contract');
+  logger.keeper.info('  5. Non-stablecoin tokens are filtered at parse time');
+  logger.keeper.info('  6. Aave base currency (8 decimals) is validated');
+  logger.keeper.info('='.repeat(60));
+  logger.keeper.info('Starting continuous monitoring loop');
+  logger.keeper.info('Press Ctrl+C to stop gracefully');
+  logger.keeper.info('='.repeat(60));
+
+  // Start the infinite loop (this never returns unless shutdown)
+  await runForever(runnerConfig);
 }
 
-// Entry point
-runKeeper().catch((error) => {
-  logger.keeper.error('Fatal error', {
+// ============================================================
+// ENTRY POINT
+// ============================================================
+
+bootstrap().catch((error) => {
+  logger.keeper.error('Fatal bootstrap error', {
     error: error instanceof Error ? error.message : 'Unknown error',
+    stack: error instanceof Error ? error.stack : undefined,
   });
   process.exit(1);
 });
